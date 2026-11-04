@@ -52,7 +52,7 @@ B站评论/跟进仍按原开关和账本运行；不复制Life名单、不回�
 在 MaiBot 根目录执行：
 
 ```sh
-git clone https://github.com/znzsofficial/bilibili_autopilot.git plugins/local_bilibili-autopilot
+git clone https://github.com/RoselindLabs/bilibili_autopilot.git plugins/local_bilibili-autopilot
 ```
 
 重新加载插件或重启 MaiBot，Host 会根据清单安装依赖。需要手动安装时，在 MaiBot 使用的 Python 环境中执行 `uv pip install -r plugins/local_bilibili_autopilot/requirements.txt`。

@@ -9,10 +9,10 @@
     "url": "https://github.com/namchengwuqiu"
   },
   "urls": {
-    "repository": "https://github.com/znzsofficial/bilibili_autopilot",
-    "homepage": "https://github.com/znzsofficial/bilibili_autopilot",
-    "documentation": "https://github.com/znzsofficial/bilibili_autopilot#readme",
-    "issues": "https://github.com/znzsofficial/bilibili_autopilot/issues"
+    "repository": "https://github.com/RoselindLabs/bilibili_autopilot",
+    "homepage": "https://github.com/RoselindLabs/bilibili_autopilot",
+    "documentation": "https://github.com/RoselindLabs/bilibili_autopilot#readme",
+    "issues": "https://github.com/RoselindLabs/bilibili_autopilot/issues"
   },
   "license": "MIT",
   "host_application": {
