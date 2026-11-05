@@ -20,6 +20,43 @@ from test_autopilot import ITEM, EVIDENCE, reflection
 class JournalTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = fixtures.EngineTests.asyncSetUp
 
+    async def test_context_prioritizes_old_revisit_and_topic_over_recent_author(self):
+        def add(item, when, uid='1001', status='noted'):
+            key = journal.begin(self.store, uid, item, when)
+            journal.finish(self.store, key, uid, status, {'thought': '真实历史感想' * 60}, when)
+            return key
+        target = replace(ITEM, topic='海洋', up_uid='author')
+        revisit = add(target, self.now - 100)
+        topic = add(replace(target, bvid='topic-video', up_uid='other'), self.now - 90)
+        author = add(replace(target, bvid='author-video', topic='音乐'), self.now - 80)
+        foreign = add(target, self.now + 100, uid='other')
+        failed = add(target, self.now + 90, status='failed')
+        for i in range(12):
+            add(replace(target, bvid=f'recent-{i}', topic='游戏', up_uid='recent'), self.now + i)
+        history = journal.context(self.store, '1001', target)
+        self.assertEqual([h['id'] for h in history[:3]], [revisit, topic, author])
+        self.assertEqual([h['retrieval_match'] for h in history[:3]], ['same_video', 'same_topic', 'same_up'])
+        ids = [h['id'] for h in history]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertNotIn(foreign, ids)
+        self.assertNotIn(failed, ids)
+        self.assertLessEqual(len(history), journal.CONTEXT_LIMIT)
+        actual = json.loads(journal.prompt(target, EVIDENCE, '人设', '', history, self.now,
+                                          'Asia/Shanghai')[1]['content'])['history']
+        self.assertLessEqual(len(json.dumps(actual, ensure_ascii=False)), journal.CONTEXT_CHARS)
+
+    async def test_unknown_author_and_empty_topic_do_not_imply_related_history(self):
+        item = replace(ITEM, up_uid='', topic='')
+        key = journal.begin(self.store, '1001', replace(item, bvid='different'), self.now)
+        journal.finish(self.store, key, '1001', 'noted', {'thought': '保留的想法'}, self.now)
+        self.assertEqual(journal.context(self.store, '1001', item)[0]['retrieval_match'], 'recent')
+
+    def test_reflection_keeps_personality_and_style_within_existing_budget(self):
+        persona = '完整人设正文' * 160 + '\n' + '表达风格末尾' * 80
+        prompt = journal.prompt(ITEM, EVIDENCE, persona, '', [], 1, 'Asia/Shanghai')
+        self.assertIn(persona, prompt[0]['content'])
+        self.assertIn('不证明观点相关', prompt[0]['content'])
+
     async def test_stage_routing_preserves_round_snapshot_and_single_reflection_chain(self):
         await self.setup_journal()
         self.cfg.browse.autonomous_enabled = True

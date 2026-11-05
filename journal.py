@@ -13,6 +13,8 @@ from .models import decision_object, normalized
 
 CAPACITY = 20000
 REVISIT_SECONDS = 7 * 86400
+CONTEXT_LIMIT = 10
+CONTEXT_CHARS = 4000
 
 
 def initialize(db):
@@ -67,24 +69,42 @@ def decode(row):
 
 
 def context(store, uid, item=None):
-    """Recent plus same-UP/topic experiences; only concrete retained records can be linked."""
+    """Revisit/topic first, then author and recent; account-scoped, bounded excerpts."""
+    candidates = []
     with store.connect() as db:
-        rows = db.execute("SELECT * FROM journal WHERE uid=? AND status='noted' ORDER BY started DESC LIMIT 6",
-                          (uid,)).fetchall()
         if item is not None:
-            rows += db.execute(
-                "SELECT * FROM journal WHERE uid=? AND status='noted' AND (bvid=? OR "
-                "json_extract(video,'$.up_uid')=? OR (?!='' AND json_extract(video,'$.topic')=?)) "
-                'ORDER BY started DESC LIMIT 4', (uid, item.bvid, item.up_uid, item.topic, item.topic),
-            ).fetchall()
+            groups = [('same_video', 'bvid=?', item.bvid, 2),
+                      ('same_topic', "json_extract(video,'$.topic')=?", item.topic, 4),
+                      ('same_up', "json_extract(video,'$.up_uid')=?", item.up_uid, 2)]
+            for relation, predicate, value, limit in groups:
+                # Empty/unknown metadata must never create a relevance match.
+                if not value or str(value).strip() in {'', '0'}:
+                    continue
+                rows = db.execute(
+                    "SELECT * FROM journal WHERE uid=? AND status='noted' AND " + predicate
+                    + ' ORDER BY started DESC,id DESC LIMIT ?', (uid, value, limit),
+                ).fetchall()
+                candidates.extend((row, relation) for row in rows)
+        rows = db.execute("SELECT * FROM journal WHERE uid=? AND status='noted' "
+                          "ORDER BY started DESC,id DESC LIMIT 6", (uid,)).fetchall()
+        candidates.extend((row, 'recent') for row in rows)
     result = []
-    for row in rows:
+    budget_rows = []
+    for row, relation in candidates:
         if any(r['id'] == row['id'] for r in result):
             continue
         value = decode(row)
-        result.append({'id': row['id'], 'time': row['started'], 'bvid': row['bvid'],
-                       'title': value['video']['title'][:160], 'thought': value.get('thought', '')[:400],
-                       'topic': value.get('topic', '')[:60]})
+        entry = {'id': row['id'], 'time': row['started'], 'bvid': row['bvid'],
+                 'title': value['video']['title'][:160], 'thought': value.get('thought', '')[:400],
+                 'topic': value.get('topic', '')[:60], 'retrieval_match': relation}
+        # Reserve enough for the ISO timestamp substituted by the reflection prompt.
+        reserved = {**entry, 'time': '0' * 64}
+        if len(json.dumps([*budget_rows, reserved], ensure_ascii=False)) > CONTEXT_CHARS:
+            continue
+        result.append(entry)
+        budget_rows.append(reserved)
+        if len(result) >= CONTEXT_LIMIT:
+            break
     return result
 
 
@@ -140,6 +160,9 @@ def prompt(item, evidence, persona, interests, history, now, timezone):
             '不要凑字数、套每日总结模板或以分享为目的寻找价值。只谈资料支持的内容；'
             '未看到画面或听音频，不编造视觉、声音、当前情绪、聊天或生活经历。'
             '历史是当时的想法，不是权威事实；有关联可以接着想，也可以改变看法，不强行串联。'
+            'history中的retrieval_match仅说明同视频、同题材、同UP或近期的检索来源，'
+            '不证明观点相关；同UP不代表同主题。只在内容确有关联时填写related_ids，'
+            '重访时可说明延续或改变了什么，资料不足时不推断自己过去的想法。'
             '输出一个JSON对象：thought(0至800字，无感可空)，reason(一句阅读印象，1至200字)，'
             'evidence_quote(原资料连续引用6至400字，有感想必填)，topic(具体话题至60字)，'
             'related_ids(确有关联的历史id，最多2个)，share_reason(为什么可能想和人聊，至200字，不想分享就空)。'
