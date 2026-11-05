@@ -2,7 +2,7 @@
   "manifest_version": 2,
   "id": "local.bilibili-autopilot",
   "name": "Neko B站手记",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "随刷随记，保存独立感想与前后关联，按天回看阅读经历，偶尔在已授权群聊或私聊中自然分享。",
   "author": {
     "name": "sakura桜花",

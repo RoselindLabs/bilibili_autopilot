@@ -4,7 +4,8 @@
 Append-only experiences live in the existing state database (20,000 entries, no automatic deletion),
 with bounded real-history context and source quotes, not renamed comment drafts. A week-old
 completed reading may be revisited if recommended again. Interrupted/failed reflections never replay.
-The custom journal page uses the Host management bridge; legacy administration remains available.
+The custom journal page uses the Host management bridge; legacy administration remains available
+inside its collapsed management section (0.10.1), with no separate legacy sidebar/table page.
 Explicit `ecosystem.qq_friend_ids` defaults empty; private scope resolution requires the declared
 `chat.get_private_streams` capability and both sides' existing grants for proactive sharing.
 Neko Proactive 2.9.4 preserves reflection and conversation relevance within the original prompt budget.
