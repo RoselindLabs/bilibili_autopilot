@@ -7,6 +7,8 @@ import asyncio
 import base64
 import contextlib
 import json
+import sqlite3
+import uuid
 import re
 import time
 from datetime import datetime
@@ -72,6 +74,8 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
         self.discovery = None
         self._history_handoff = HistoryHandoff()
         self._history_closed = False
+        self._journal_revision = 0
+        self._journal_deletions = {}
 
     async def on_load(self) -> None:
         self._history_closed = False
@@ -105,6 +109,7 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
 
     async def on_unload(self) -> None:
         self._history_closed = True
+        self._journal_deletions.clear()
         if self.discovery is not None:
             self.discovery.closed = True
         self._history_handoff.turns.clear()
@@ -116,11 +121,15 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
             if task is not None:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
+        if self.engine is not None:
+            async with self.engine.lock:
+                pass  # Wait for an admitted management transaction before unload.
         if self.client is not None:
             await self.client.close()
 
     async def on_config_update(self, scope: str, config_data: Dict[str, Any], version: str) -> None:
         del scope, config_data, version
+        self._journal_deletions.clear()
         self._history_handoff.turns.clear()
         if self.sharer is not None:
             self._share_targets = await self.sharer.targets_summary()
@@ -130,11 +139,11 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
                 await self.engine.pause("已在配置中禁用", kind="disabled")
         self._wake.set()
 
-    async def _remember_reading(self, uid, item, evidence, decision):
+    async def _remember_reading(self, uid, item, evidence, decision, journal_id=''):
         cfg = self.config
         if (self.discovery is not None and not self.discovery.closed and cfg.plugin.enabled
                 and cfg.ecosystem.enabled and decision.interest >= cfg.ecosystem.min_interest):
-            await discovery_io(self.discovery.store.remember, uid, item, evidence, decision, time.time())
+            await discovery_io(self.discovery.store.remember, uid, item, evidence, decision, time.time(), journal_id)
 
     async def _share_after_comment(self, uid, item):
         if self.config.ecosystem.enabled:
@@ -179,6 +188,7 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
 
     @HookHandler("maisaka.replyer.before_request", mode=HookMode.BLOCKING, order=HookOrder.LATE)
     async def inject_history_facts(self, **kwargs: Any) -> Dict[str, Any]:
+        revision = self._journal_revision
         if not self.config.plugin.enabled or self.client is None or not self.client.uid or self._history_closed:
             self._history_handoff.turns.clear()
             return {"action": "continue"}
@@ -210,6 +220,8 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
                     token[0].scope = scope
                 prompt = self._history_handoff.prompt(session, message_id, uid)
                 self.ctx.logger.info("B站历史交接：回复前已刷新本地记录 records=%s", len(result["records"]))
+        if revision != self._journal_revision:
+            return {"action": "continue"}
         if not prompt:
             turn = self._history_handoff.turns.get(session)
             self.ctx.logger.debug(
@@ -260,13 +272,14 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
             return {"success": False, "content": "当前聊天未获B站资料授权，或QQ会话身份暂不可核验。"}
         uid = self.client.uid
         try:
+            revision = self._journal_revision
             result = await asyncio.to_thread(
                 query_activity, self.engine.store, uid, now=self.engine.clock(), timezone=self.config.browse.timezone,
                 query=query, kind=kind, days=days, limit=limit,
             )
         except ValueError as exc:
             return {"success": False, "content": str(exc)}
-        if await self._history_scope(session) != scope:
+        if await self._history_scope(session) != scope or revision != self._journal_revision:
             self._history_handoff.turns.pop(session, None)
             return {"success": False, "content": "查询期间账号、群授权或插件状态发生变化，请重新查询。"}
         self._history_handoff.remember(session, token, uid, result)
@@ -607,6 +620,7 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
     async def reading_journal(self, day: str = '', before: str = '', query: str = ''):
         assert self.engine is not None and self.client is not None
         uid, cfg = self.client.uid, self.config
+        revision = self._journal_revision
         today = datetime.fromtimestamp(self.engine.clock(), ZoneInfo(cfg.browse.timezone)).strftime('%Y-%m-%d')
         chosen_day = today if day == 'today' else day
         result = await discovery_io(journal.page, self.engine.store, uid, cfg.browse.timezone, chosen_day, before, query)
@@ -614,10 +628,58 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
             summaries = await discovery_io(self.discovery.store.journal_shares, uid, result['entries'])
             for entry in result['entries']:
                 entry['sharing'] = summaries.get(entry['id'], '')
-        if self.client.uid != uid or self.config != cfg or self._history_closed:
+        if self.client.uid != uid or self.config != cfg or self._history_closed or revision != self._journal_revision:
             raise ValueError('账号或配置已改变，请刷新手记')
         result.update(today=today, day=chosen_day, logged_in=bool(uid))
         return result
+
+    @API('prepare_journal_delete', description='确认待删除手记的数量，不删除内容', version='1')
+    async def prepare_journal_delete(self, ids: str = '', failed: bool = False):
+        assert self.engine is not None and self.client is not None
+        uid = self.client.uid
+        if self._history_closed or not uid:
+            raise ValueError('请先登录B站账号')
+        expected, titles = await discovery_io(journal.deletion_selection, self.engine.store, uid, ids, failed)
+        if self.client.uid != uid or self._history_closed:
+            raise ValueError('账号已改变，请刷新手记')
+        now = time.monotonic()
+        self._journal_deletions = {k: v for k, v in self._journal_deletions.items() if v[1] > now}
+        if len(self._journal_deletions) >= 8:
+            self._journal_deletions.pop(next(iter(self._journal_deletions)))
+        token = uuid.uuid4().hex
+        if expected:
+            self._journal_deletions[token] = (uid, now + 120, expected)
+        return {'token': token if expected else '', 'count': len(expected), 'titles': titles,
+                'account': f'{self.client.name}（UID {uid}）'}
+
+    @API('delete_journal', description='删除已确认的手记内容，保留防重复与发送账本', version='1')
+    async def delete_journal(self, token: str):
+        assert self.engine is not None and self.client is not None
+        pending = self._journal_deletions.pop(token, None) if isinstance(token, str) else None
+        if (not pending or pending[0] != self.client.uid or pending[1] <= time.monotonic()
+                or self._history_closed or self.discovery is None):
+            return self._ui_result(False, '删除确认已过期或账号改变，请重新选择')
+        if self.engine.lock.locked():
+            return self._ui_result(False, '当前正在阅读或登录，请稍后重新选择')
+        async with self.engine.lock:
+            # Initialize the existing sharing DB before attaching it; no model/network.
+            await discovery_io(self.discovery.store.journal_shares, pending[0], [])
+            if self.client.uid != pending[0] or self._history_closed:
+                return self._ui_result(False, '账号已改变，请刷新手记')
+            self._journal_revision += 1
+            self._history_handoff.turns.clear()
+            try:
+                count = await discovery_io(journal.delete_entries, self.engine.store, pending[0], pending[2], self.discovery.store.path)
+                self.engine.last_result = '已整理手记'
+                self._last_operation = f'已删除 {count} 条手记'
+                return self._ui_result(True, self._last_operation)
+            except ValueError as exc:
+                return self._ui_result(False, str(exc))
+            except (OSError, sqlite3.Error):
+                return self._ui_result(False, '删除未完成，请刷新后重新选择')
+            finally:
+                self._journal_revision += 1
+                self._history_handoff.turns.clear()
 
     @API("autopilot_command", description="执行 B 站插件自身的管理指令，不执行系统命令", version="1")
     async def autopilot_command(self, command: str) -> Dict[str, Any]:
@@ -646,6 +708,7 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
     @API("autopilot_logout", description="暂停并退出本插件的 B 站账号", version="1")
     async def autopilot_logout(self) -> Dict[str, Any]:
         assert self.engine is not None
+        self._journal_deletions.clear()
         await self.engine.pause("管理员退出账号", kind="logout")
         if self._job is not None and not self._job.done():
             self._job.cancel()

@@ -1226,7 +1226,7 @@ class Autopilot:
                                           'source': evidence.source}, ensure_ascii=False), retryable=False)
             if reflection.share_reason and self.reading_sink is not None:
                 try:
-                    await self.reading_sink(uid, item, evidence, reflection)
+                    await self.reading_sink(uid, item, evidence, reflection, journal_id=key)
                 except asyncio.CancelledError:
                     raise
                 except Exception:

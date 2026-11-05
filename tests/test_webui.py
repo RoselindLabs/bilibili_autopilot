@@ -13,6 +13,8 @@ from local_bilibili_autopilot.models import Evidence, IncomingReply, VideoItem
 from local_bilibili_autopilot.plugin import BilibiliAutopilotPlugin
 from local_bilibili_autopilot.state import StateStore
 from local_bilibili_autopilot.webui import record_row
+from local_bilibili_autopilot import journal
+from local_bilibili_autopilot.reading_bridge import ReadingStore
 
 
 ITEM = VideoItem("BV1234567890", 1, "游戏音乐制作", "2", "测试UP", 120)
@@ -58,6 +60,38 @@ class WebUITests(unittest.IsolatedAsyncioTestCase):
         self.plugin.engine.generate.assert_not_awaited()
         self.assertIsNone(self.plugin._job)
         self.assertNotIn("credential", json.dumps(overview))
+
+    async def test_journal_delete_tokens_are_account_bound_expiring_and_single_use(self):
+        store=self.plugin.engine.store
+        key=journal.begin(store,'1',ITEM,1)
+        journal.finish(store,key,'1','failed',{'reason':'测试错误'},2)
+        self.plugin.discovery=SimpleNamespace(store=ReadingStore(store.path.parent))
+        prepared=await self.plugin.prepare_journal_delete(ids=key)
+        self.assertEqual(prepared['count'],1)
+        self.client.uid='2'
+        self.assertFalse((await self.plugin.delete_journal(prepared['token']))['ok'])
+        self.client.uid='1'
+        prepared=await self.plugin.prepare_journal_delete(ids=key)
+        self.plugin._journal_deletions[prepared['token']]=('1',0,{})
+        self.assertFalse((await self.plugin.delete_journal(prepared['token']))['ok'])
+        prepared=await self.plugin.prepare_journal_delete(ids=key)
+        self.assertTrue((await self.plugin.delete_journal(prepared['token']))['ok'])
+        self.assertFalse((await self.plugin.delete_journal(prepared['token']))['ok'])
+        self.assertEqual((await self.plugin.reading_journal())['entries'],[])
+        self.client.check_account.assert_not_awaited()
+        self.plugin.engine.generate.assert_not_awaited()
+
+    async def test_reading_and_busy_journal_deletion_are_rejected(self):
+        store=self.plugin.engine.store
+        key=journal.begin(store,'1',ITEM,1)
+        with self.assertRaises(ValueError):
+            await self.plugin.prepare_journal_delete(ids=key)
+        journal.finish(store,key,'1','failed',{},2)
+        self.plugin.discovery=SimpleNamespace(store=ReadingStore(store.path.parent))
+        prepared=await self.plugin.prepare_journal_delete(ids=key)
+        async with self.plugin.engine.lock:
+            self.assertFalse((await self.plugin.delete_journal(prepared['token']))['ok'])
+        self.assertEqual(len((await self.plugin.reading_journal())['entries']),1)
 
     async def test_page_uses_current_maximum_for_previously_saved_long_wait(self):
         from datetime import datetime

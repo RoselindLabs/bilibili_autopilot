@@ -11,6 +11,7 @@ from local_bilibili_autopilot import journal
 from local_bilibili_autopilot.activity import query_activity, activity_reply_prompt
 from local_bilibili_autopilot.models import Evidence
 from local_bilibili_autopilot.reading_bridge import authorized_chat
+from local_bilibili_autopilot.reading_bridge import ReadingStore
 import test_autopilot as fixtures
 from bilibili_api.exceptions import WbiRetryTimesExceedException
 from test_autopilot import ITEM, EVIDENCE, reflection
@@ -136,6 +137,95 @@ class JournalTests(unittest.IsolatedAsyncioTestCase):
             self.client.understand.assert_not_awaited()
             self.assertTrue(self.engine.paused)
             self.assertEqual(len(self.entries()), 1)
+
+    async def test_delete_scrubs_copies_and_pending_material_but_keeps_unknown_and_dedupe(self):
+        await self.setup_journal()
+        await self.engine.round()
+        original = self.entries()[0]
+        bridge = ReadingStore(self.store.path.parent)
+        decision = journal.parse(reflection(), EVIDENCE, [])
+        bridge.remember('1001', ITEM, EVIDENCE, decision, self.now, original['id'])
+        offer = bridge.claim('1001', 'chat', 'robot', self.now, 10, 0)
+        self.store.reserve('1001', ITEM.bvid, '旧评论', self.now, 0, 10, 0, .99)
+        self.store.finish('1001', ITEM.bvid, 'unknown')
+        self.now += journal.REVISIT_SECONDS + 1
+        self.generate.return_value = reflection(related_ids=[original['id']])
+        await self.engine.round()
+        expected, _ = journal.deletion_selection(self.store, '1001', original['id'])
+        self.assertEqual(journal.delete_entries(self.store, '1001', expected, bridge.path), 1)
+        remaining = self.entries()
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]['related'], [{'id': original['id'], 'deleted': True}])
+        with self.store.connect() as db:
+            tombstone = db.execute('SELECT * FROM journal WHERE id=?', (original['id'],)).fetchone()
+            self.assertEqual((tombstone['video'], tombstone['payload'], tombstone['status']), ('{}','{}','deleted'))
+        self.assertEqual(self.store.stats('1001', 0)['unresolved'], [ITEM.bvid])
+        self.assertIsNone(bridge.operate('prompt', '1001', 'chat', 'robot',
+                         {**offer, 'host_task': 'proactive:neko.proactive:1234567890'}, self.now)['candidate'])
+        self.assertIsNone(bridge.claim('1001', 'other', 'robot', self.now, 10, 0))
+        self.assertTrue(self.store.seen('1001', ITEM.bvid, 'journal', now=self.now+86400*30))
+        self.assertEqual(len(journal.context(self.store,'1001')),1)
+
+    async def test_delete_selection_is_frozen_owned_and_frees_capacity(self):
+        await self.setup_journal()
+        first = journal.begin(self.store, '1001', ITEM, self.now)
+        journal.finish(self.store, first, '1001', 'failed', {'reason':'失败内容'}, self.now)
+        expected, _ = journal.deletion_selection(self.store,'1001',failed=True)
+        second = journal.begin(self.store, '1001', replace(ITEM,bvid='BV0987654321'), self.now+1)
+        journal.finish(self.store,second,'1001','interrupted',{'reason':'后来的失败'},self.now+2)
+        bridge=ReadingStore(self.store.path.parent)
+        bridge.journal_shares('1001',[])
+        with self.assertRaises(ValueError):
+            journal.delete_entries(self.store,'2002',expected,bridge.path)
+        with patch.object(journal,'CAPACITY',2):
+            self.assertFalse(journal.capacity(self.store))
+            journal.delete_entries(self.store,'1001',expected,bridge.path)
+            self.assertTrue(journal.capacity(self.store))
+        self.assertEqual([r['id'] for r in self.entries()],[second])
+        with self.assertRaises(ValueError):
+            journal.delete_entries(self.store,'1001',expected,bridge.path)
+        with self.assertRaises(ValueError):
+            journal.deletion_selection(self.store,'2002',second)
+        with self.assertRaises(ValueError):
+            journal.begin(self.store,'1001',ITEM,self.now+86400*30)
+
+    async def test_delete_failure_rolls_back_both_databases(self):
+        await self.setup_journal()
+        await self.engine.round()
+        key=self.entries()[0]['id']
+        expected,_=journal.deletion_selection(self.store,'1001',key)
+        bridge=ReadingStore(self.store.path.parent)
+        bridge.remember('1001',ITEM,EVIDENCE,journal.parse(reflection(),EVIDENCE,[]),self.now,key)
+        with bridge.connect() as db:
+            db.execute("CREATE TRIGGER reject_delete BEFORE DELETE ON readings BEGIN SELECT RAISE(ABORT,'blocked'); END")
+        import sqlite3
+        with self.assertRaises(sqlite3.IntegrityError):
+            journal.delete_entries(self.store,'1001',expected,bridge.path)
+        self.assertEqual(self.entries()[0]['status'],'noted')
+        with bridge.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM readings').fetchone()[0],1)
+
+    async def test_legacy_material_is_bound_to_its_read_and_latest_visit_is_scrubbed(self):
+        await self.setup_journal()
+        await self.engine.round()
+        first=self.entries()[0]['id']
+        self.now += journal.REVISIT_SECONDS + 1
+        await self.engine.round()
+        second=self.entries()[0]['id']
+        bridge=ReadingStore(self.store.path.parent)
+        bridge.remember('1001',ITEM,EVIDENCE,journal.parse(reflection(),EVIDENCE,[]),self.now)
+        expected,_=journal.deletion_selection(self.store,'1001',first)
+        journal.delete_entries(self.store,'1001',expected,bridge.path)
+        with bridge.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM readings').fetchone()[0],1)
+        expected,_=journal.deletion_selection(self.store,'1001',second)
+        journal.delete_entries(self.store,'1001',expected,bridge.path)
+        with bridge.connect() as db:
+            self.assertEqual(db.execute('SELECT count(*) FROM readings').fetchone()[0],0)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT detail FROM visits WHERE mode='journal'").fetchone()[0],'{}')
+        self.assertEqual(self.store.page_records('1001','visits','',1)['rows'],[])
+        self.assertEqual(query_activity(self.store,'1001',now=self.now,timezone='Asia/Shanghai',days=0)['records'],[])
 
     async def test_history_day_pagination_and_account_isolation(self):
         await self.setup_journal()

@@ -107,7 +107,7 @@ class ReadingStore:
         finally:
             db.close()
 
-    def remember(self, uid, item, evidence, decision, now):
+    def remember(self, uid, item, evidence, decision, now, journal_id=''):
         if not uid.isdecimal() or not re.fullmatch(r"BV[0-9A-Za-z]{10}", item.bvid):
             raise ValueError("invalid_reading_identity")
         text = evidence.text.strip()
@@ -119,6 +119,7 @@ class ReadingStore:
             "opinion": getattr(decision, 'thought', decision.reason)[:800],
             "share_reason": getattr(decision, 'share_reason', '')[:200],
             "journal": hasattr(decision, 'thought'),
+            "journal_id": journal_id,
             "url": "https://www.bilibili.com/video/" + item.bvid,
             "source_kind": evidence.source[:100],
             "coverage": evidence.coverage[:160],

@@ -275,7 +275,7 @@ def query_activity(
             UNION ALL
             SELECT 'journal', j.bvid, j.started, 'journal', j.status,
                    json_set(j.payload,'$.video',json(j.video)), '', '', NULL
-            FROM journal j WHERE j.uid=:uid
+            FROM journal j WHERE j.uid=:uid AND j.status!='deleted'
             UNION ALL
             SELECT 'comments', a.bvid, a.ts, 'publish', a.status,
                    coalesce((SELECT v.detail FROM visits v WHERE v.uid=a.uid AND v.bvid=a.bvid

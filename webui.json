@@ -6,6 +6,10 @@
     "id": "manage", "title": "B站手记", "description": "随刷随记，回看每天留下的感想。",
     "placement": "sidebar", "icon": "list", "mode": "custom", "entry": "journal.html", "layout": "document",
     "queries": {
+      "prepare_delete": {"api": "prepare_journal_delete", "parameters": {
+        "ids": {"type": "string", "max_length": 6600},
+        "failed": {"type": "boolean"}
+      }},
       "overview": {"api": "autopilot_overview", "parameters": {}},
       "journal": {"api": "reading_journal", "parameters": {
         "day": {"type": "string", "max_length": 10},
@@ -19,6 +23,9 @@
       }}
     },
     "actions": {
+      "delete_journal": {"api": "delete_journal", "parameters": {
+        "token": {"type": "string", "required": true, "max_length": 32}
+      }, "confirmation": "永久删除刚才确认的手记内容和待分享素材？此操作无法撤销。"},
       "command": {"api": "autopilot_command", "parameters": {
         "command": {"type": "string", "required": true, "choices": ["/bili_auto start", "/bili_auto pause", "/bili_auto login", "/bili_auto status", "/bili_auto preview", "/bili_auto replies"]}
       }},

@@ -2,6 +2,7 @@
 
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
+import hashlib
 import json
 import re
 import unicodedata
@@ -30,14 +31,16 @@ def initialize(db):
 
 def capacity(store):
     with store.connect() as db:
-        return db.execute("SELECT count(*) FROM journal").fetchone()[0] < CAPACITY
+        return db.execute("SELECT count(*) FROM journal WHERE status!='deleted'").fetchone()[0] < CAPACITY
 
 
 def begin(store, uid, item, now):
     with store.connect() as db:
         db.execute('BEGIN IMMEDIATE')
-        if db.execute('SELECT count(*) FROM journal').fetchone()[0] >= CAPACITY:
+        if db.execute("SELECT count(*) FROM journal WHERE status!='deleted'").fetchone()[0] >= CAPACITY:
             raise ValueError('手记已达2万条，请先整理保存空间')
+        if db.execute("SELECT 1 FROM journal WHERE uid=? AND bvid=? AND status='deleted'", (uid, item.bvid)).fetchone():
+            raise ValueError('这条视频的手记已删除，不自动重新阅读')
         key = uuid.uuid4().hex
         video = {k: v[:500] if isinstance(v, str) else v for k, v in asdict(item).items()}
         db.execute('INSERT INTO journal(id,uid,bvid,started,status,video) VALUES(?,?,?,?,?,?)',
@@ -173,7 +176,7 @@ def page(store, uid, timezone, day='', before='', query='', limit=30):
         direction, comparison = ('ASC', '>') if day else ('DESC', '<')
         boundary = cursor['started'] if cursor else (-1 if day else 1e12)
         rows = db.execute(
-            'SELECT * FROM journal WHERE uid=? AND started>=? AND started<? '
+            "SELECT * FROM journal WHERE uid=? AND status!='deleted' AND started>=? AND started<? "
             'AND (?=\'\' OR instr(lower(video||payload),lower(?))>0) '
             f'AND (started{comparison}? OR (started=? AND id{comparison}?)) '
             f'ORDER BY started {direction},id {direction} LIMIT ?',
@@ -189,3 +192,82 @@ def page(store, uid, timezone, day='', before='', query='', limit=30):
         value['url'] = 'https://www.bilibili.com/video/' + row['bvid']
         entries.append(value)
     return {'entries': entries, 'next': rows[limit-1]['id'] if len(rows) > limit else '', 'timezone': timezone}
+
+
+def deletion_selection(store, uid, ids='', failed=False):
+    """Freeze exact terminal entries for a short-lived, account-bound confirmation."""
+    if not uid or type(failed) is not bool or not isinstance(ids, str) or len(ids) > 6600:
+        raise ValueError('删除参数无效')
+    keys = ids.split(',') if ids else []
+    if failed and keys or not failed and not 1 <= len(keys) <= 200:
+        raise ValueError('请选择1至200条手记，或清理全部失败／中断记录')
+    if len(set(keys)) != len(keys) or any(not re.fullmatch('[a-f0-9]{32}', key) for key in keys):
+        raise ValueError('手记编号无效')
+    with store.connect() as db:
+        if failed:
+            rows = db.execute("SELECT * FROM journal WHERE uid=? AND status IN ('failed','interrupted') ORDER BY id", (uid,)).fetchall()
+        else:
+            placeholders = ','.join('?' for _ in keys)
+            rows = db.execute(f'SELECT * FROM journal WHERE uid=? AND id IN ({placeholders}) ORDER BY id', (uid, *keys)).fetchall()
+            if len(rows) != len(keys) or any(r['status'] in {'reading', 'deleted'} for r in rows):
+                raise ValueError('所选手记已改变或仍在阅读，请刷新后选择')
+    return deletion_fingerprints(rows), [json.loads(r['video']).get('title', '手记')[:160] for r in rows[:3]]
+
+
+def deletion_fingerprints(rows):
+    return {r['id']: hashlib.sha256(json.dumps(dict(r), sort_keys=True).encode()).hexdigest() for r in rows}
+
+
+def delete_entries(store, uid, expected, discovery_path):
+    """Erase content and copies atomically; keep identity tombstones and send ledgers.
+
+    Both existing databases use rollback journals. ATTACH makes the removal of
+    pending material and journal content one durable commit, including crash recovery.
+    The caller holds the engine lock so no reading can finish or publish a new copy.
+    """
+    if not uid or not expected or len(expected) > CAPACITY:
+        raise ValueError('删除确认无效或已过期')
+    with store.connect() as db:
+        if discovery_path.is_symlink() or not discovery_path.is_file():
+            raise ValueError('分享数据库不可用，尚未删除')
+        db.execute('ATTACH DATABASE ? AS sharing', (str(discovery_path),))
+        for schema in ('main', 'sharing'):
+            if db.execute(f'PRAGMA {schema}.journal_mode').fetchone()[0] not in {'delete', 'truncate', 'persist'}:
+                raise ValueError('数据库日志模式不支持原子清理，尚未删除')
+        db.execute('BEGIN IMMEDIATE')
+        # Select by account, then compare the frozen set; no large SQL parameter list.
+        rows = [r for r in db.execute('SELECT * FROM journal WHERE uid=?', (uid,)) if r['id'] in expected]
+        if deletion_fingerprints(rows) != expected or any(r['status'] in {'reading', 'deleted'} for r in rows):
+            raise ValueError('手记在确认期间已改变，请重新选择')
+        bvids = {r['bvid'] for r in rows}
+        for row in rows:
+            db.execute("UPDATE journal SET status='deleted',video='{}',payload='{}' WHERE uid=? AND id=?", (uid, row['id']))
+            latest = db.execute('SELECT id FROM journal WHERE uid=? AND bvid=? ORDER BY started DESC LIMIT 1',
+                                (uid, row['bvid'])).fetchone()
+            if latest['id'] == row['id']:
+                db.execute("UPDATE visits SET detail='{}',outcome='deleted',retry_at=0 "
+                           "WHERE uid=? AND bvid=? AND mode='journal'", (uid, row['bvid']))
+        # Related thoughts are snapshots, so remove their saved copies as well.
+        for row in db.execute("SELECT id,payload FROM journal WHERE uid=? AND status!='deleted'", (uid,)).fetchall():
+            payload = json.loads(row['payload'])
+            related = payload.get('related', [])
+            if any(r.get('id') in expected for r in related):
+                payload['related'] = [{'id': r['id'], 'deleted': True} if r.get('id') in expected else r for r in related]
+                db.execute('UPDATE journal SET payload=? WHERE uid=? AND id=?',
+                           (json.dumps(payload, ensure_ascii=False), uid, row['id']))
+        for material in db.execute('SELECT bvid,created,payload FROM sharing.readings WHERE uid=?', (uid,)).fetchall():
+            if material['bvid'] not in bvids:
+                continue
+            payload = json.loads(material['payload'])
+            if not payload.get('journal'):
+                continue
+            # Old material has no journal_id: bind it to the last read before creation.
+            origin = payload.get('journal_id')
+            if not origin:
+                latest = db.execute('SELECT id FROM journal WHERE uid=? AND bvid=? AND started<=? ORDER BY started DESC LIMIT 1',
+                                    (uid, material['bvid'], material['created'])).fetchone()
+                origin = latest['id'] if latest else None
+            if origin in expected:
+                db.execute('DELETE FROM sharing.readings WHERE uid=? AND bvid=?', (uid, material['bvid']))
+                # Keep offers (including unknown/shown and quota accounting) intact.
+        return len(rows)

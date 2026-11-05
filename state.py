@@ -348,6 +348,8 @@ class StateStore:
         now = time.time() if now is None else now
         with self.connect() as db:
             if mode == 'journal':
+                if db.execute("SELECT 1 FROM journal WHERE uid=? AND bvid=? AND status='deleted'", (uid, bvid)).fetchone():
+                    return True
                 last = db.execute('SELECT started,status FROM journal WHERE uid=? AND bvid=? ORDER BY started DESC LIMIT 1',
                                   (uid, bvid)).fetchone()
                 # A completed read can be revisited after a week. Failed/unknown work
@@ -778,6 +780,8 @@ class StateStore:
             raise ValueError("记录类型、搜索内容或页码无效")
         table, searchable = sources[kind]
         where, args = "uid=?", [uid]
+        if kind == 'visits':
+            where += " AND NOT (mode='journal' AND outcome='deleted')"
         if search.strip():
             pattern = search.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             where += f" AND ({searchable}) LIKE ? ESCAPE '\\'"
