@@ -116,7 +116,9 @@ class ReadingStore:
         payload = {
             "topic": item.title[:160],
             "summary": text[:480],
-            "opinion": decision.reason[:160],
+            "opinion": getattr(decision, 'thought', decision.reason)[:800],
+            "share_reason": getattr(decision, 'share_reason', '')[:200],
+            "journal": hasattr(decision, 'thought'),
             "url": "https://www.bilibili.com/video/" + item.bvid,
             "source_kind": evidence.source[:100],
             "coverage": evidence.coverage[:160],
@@ -140,7 +142,24 @@ class ReadingStore:
                 raise ValueError("nonce_capacity")
             db.execute("INSERT INTO nonces VALUES(?,?)", (nonce, now))
 
-    def claim(self, uid, session, account, now, daily_max, interval_minutes):
+    def journal_shares(self, uid, entries):
+        result = {}
+        with self.connect() as db:
+            for entry in entries:
+                rows = db.execute('SELECT status FROM offers WHERE uid=? AND bvid=? AND created>=?',
+                                  (uid, entry['bvid'], entry['started'])).fetchall()
+                states = {row['status'] for row in rows}
+                if 'unknown' in states:
+                    result[entry['id']] = '分享任务结果未知'
+                elif 'shown' in states:
+                    result[entry['id']] = '已提供给主动聊天'
+                elif states & {'prepared', 'submitted'}:
+                    result[entry['id']] = '已交给主动聊天安排'
+                elif 'released' in states:
+                    result[entry['id']] = '本次未分享'
+        return result
+
+    def claim(self, uid, session, account, now, daily_max, interval_minutes, journal_only=False):
         # Expired/failed/unknown handoffs are tombstones, not a retry queue.
         with self.connect() as db:
             if db.execute("SELECT COUNT(*) FROM offers").fetchone()[0] >= 8192:
@@ -160,8 +179,10 @@ class ReadingStore:
             if sum(r[0] >= start for r in used) >= daily_max or (used and now - used[0][0] < interval_minutes * 60):
                 return None
             row = db.execute(
-                "SELECT bvid,payload FROM readings r WHERE uid=? AND created>? AND NOT EXISTS (SELECT 1 FROM offers o WHERE o.uid=r.uid AND o.bvid=r.bvid AND o.session=?) ORDER BY created DESC LIMIT 1",
-                (uid, now - 172800, session),
+                "SELECT bvid,payload FROM readings r WHERE uid=? AND created>? "
+                "AND (?=0 OR json_extract(payload,'$.journal')=1) "
+                "AND NOT EXISTS (SELECT 1 FROM offers o WHERE o.uid=r.uid AND o.bvid=r.bvid AND o.session=?) ORDER BY created DESC LIMIT 1",
+                (uid, now - 172800, int(journal_only), session),
             ).fetchone()
             if row is None:
                 return None
@@ -239,6 +260,33 @@ def authorized_group(streams, session, groups, account_id):
     return stream
 
 
+async def authorized_chat(context, session, groups, friends, account_id):
+    streams = await asyncio.wait_for(context.chat.get_group_streams(platform='qq'), timeout=2)
+    if not isinstance(streams, list) or len(streams) > 512:
+        raise ValueError('unavailable_qq_scopes')
+    if any(isinstance(s, dict) and s.get('session_id') == session for s in streams):
+        return authorized_group(streams, session, groups, account_id)
+    if not friends:
+        raise ValueError('unauthorized_private_scope')
+    private = await asyncio.wait_for(context.chat.get_private_streams(platform='qq'), timeout=2)
+    if not isinstance(private, list) or len(private) > 512:
+        raise ValueError('unavailable_private_scopes')
+    owned = [s for s in private if isinstance(s, dict) and s.get('session_id') == session]
+    if len(owned) != 1 or not isinstance(session, str) or not 0 < len(session) <= 128:
+        raise ValueError('ambiguous_session')
+    stream = owned[0]
+    target, account = str(stream.get('user_id') or ''), str(stream.get('account_id') or '')
+    matches = [s for s in private if isinstance(s, dict) and s.get('platform') == 'qq'
+               and s.get('chat_type') == 'private' and str(s.get('user_id') or '') == target
+               and s.get('session_id') and str(s.get('account_id') or '').isdecimal()
+               and (not account_id or str(s.get('account_id') or '') == account_id)]
+    if (stream.get('platform') != 'qq' or stream.get('chat_type') != 'private' or stream.get('group_id')
+            or target not in friends or not account.isdecimal() or len(matches) != 1
+            or (account_id and account != account_id)):
+        raise ValueError('unauthorized_private_scope')
+    return stream
+
+
 class ReadingBridge:
     def __init__(self, context, get_config, get_uid, available, directory):
         self.context, self.get_config, self.get_uid, self.available = context, get_config, get_uid, available
@@ -257,6 +305,8 @@ class ReadingBridge:
             cfg.ecosystem.daily_max,
             cfg.ecosystem.interval_minutes,
             self.get_uid(),
+            tuple(cfg.ecosystem.qq_friend_ids),
+            not cfg.comment.publish_enabled,
         )
 
     async def handle(self, packet):
@@ -270,8 +320,7 @@ class ReadingBridge:
             now = time.time()
             operation, body, nonce = await io(authenticate, packet, self.directory, now)
             session = body.get("session_id")
-            streams = await asyncio.wait_for(self.context.chat.get_group_streams(platform="qq"), timeout=2)
-            stream = authorized_group(streams, session, snapshot[2], snapshot[3])
+            stream = await authorized_chat(self.context, session, snapshot[2], snapshot[7], snapshot[3])
             account = str(stream["account_id"])
             if self.closed or self.policy() != snapshot or not self.available():
                 raise ValueError("discovery_changed")
@@ -280,7 +329,7 @@ class ReadingBridge:
                 value = {
                     "success": True,
                     "candidate": await io(
-                        self.store.claim, snapshot[6], session, account, now, snapshot[4], snapshot[5]
+                        self.store.claim, snapshot[6], session, account, now, snapshot[4], snapshot[5], snapshot[8]
                     ),
                 }
             else:

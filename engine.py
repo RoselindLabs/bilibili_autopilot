@@ -44,6 +44,8 @@ from .models import (
     support_prompt,
 )
 from .state import StateStore
+from . import journal
+from .reading_bridge import io as durable_io
 
 
 class ReadWaiting(Exception):
@@ -128,9 +130,9 @@ class Autopilot:
             return "已恢复浏览；" + self.publication_hold(stats)
         if cfg.browse.autonomous_enabled:
             return "已进入自主模式，由麦麦决定这次刷不刷 B 站；" + (
-                "有合适内容时允许发表评论" if cfg.comment.publish_enabled else "评论仅预览，不会发布"
+                "有合适内容时允许发表评论" if cfg.comment.publish_enabled else "随刷随记，不发表评论"
             )
-        return "已启动自动发布" if cfg.comment.publish_enabled else "已启动自动预览（不发布评论）"
+        return "已启动自动发布" if cfg.comment.publish_enabled else "已启动浏览手记（不发布评论）"
 
     def next_check_time(self, choice: Dict[str, Any], cfg: AutopilotConfig) -> float:
         # 已保存的旧决定也服从当前间隔，缩短设置后无需等完原来的几小时。
@@ -501,6 +503,9 @@ class Autopilot:
             explore_more=cfg.browse.explore_more,
             limit=cfg.browse.videos_per_round,
         )
+        if not cfg.comment.publish_enabled:
+            memories = await durable_io(journal.context, self.store, uid)
+            prompt.append({'role': 'user', 'content': '真实近期手记，仅作兴趣参考，不是任务：' + json.dumps(memories, ensure_ascii=False)})
         try:
             raw = await self._generate_model(prompt, cfg)
         except (asyncio.TimeoutError, ModelTimeoutError):
@@ -722,7 +727,10 @@ class Autopilot:
         uid = await self._read("account", self.client.check_account, cfg)
         day_start = local_day_start(self.clock(), cfg.browse.timezone)
         stats = await asyncio.to_thread(self.store.stats, uid, day_start)
-        mode = "publish" if cfg.comment.publish_enabled and not preview else "preview"
+        mode = "preview" if preview else "publish" if cfg.comment.publish_enabled else "journal"
+        if mode == 'journal' and not await durable_io(journal.capacity, self.store):
+            await self.pause('手记已达2万条，请先整理保存空间', kind='manual')
+            return self.pause_reason
         cooling = mode == "publish" and bool(self.comment_cooldown(stats, cfg))
         quota_full = mode == "publish" and stats["attempts"] >= cfg.comment.per_day
         until = max(
@@ -767,7 +775,7 @@ class Autopilot:
                 return "本次未选中候选，继续保留：" + selection_reason
             items = [row["item"] for row in shortlist if row["bvid"] == selected]
             remaining = 1
-        retries = await asyncio.to_thread(self.store.retry_videos, uid, mode, self.clock(), eligible)
+        retries = [] if mode == 'journal' else await asyncio.to_thread(self.store.retry_videos, uid, mode, self.clock(), eligible)
         saved = list({item.bvid: item for item in retries}.values())
         self._selected_bvids = []
         if not comment_only and not preview and cfg.browse.autonomous_enabled:
@@ -813,7 +821,7 @@ class Autopilot:
             if not await self._want_to_browse(uid, cfg, stats, persona, candidates):
                 return self.last_result
             by_id = {item.bvid: item for item in candidates}
-            items = [by_id[bvid] for bvid in self._selected_bvids] if self._selected_bvids else candidates
+            items = [by_id[bvid] for bvid in self._selected_bvids] if self._selected_bvids or mode == 'journal' else candidates
             if self.paused or not self.get_config().plugin.enabled or self.get_config() != cfg or not self.active(cfg):
                 return "自主判断期间已暂停或配置、活动时段变化，本轮不浏览"
         if items is None:
@@ -860,6 +868,9 @@ class Autopilot:
             if item.topic:
                 topic_counts[item.topic] = topic_counts.get(item.topic, 0) + 1
             remaining -= 1
+            if mode == 'journal':
+                lines.append(await self._journal_read(uid, item, cfg, persona))
+                continue
             await self.record(uid, item, mode, "reading", "正在读取视频内容")
             try:
                 item, evidence = await self.client.understand(item, cfg.model.content_max_chars)
@@ -1179,11 +1190,65 @@ class Autopilot:
                 lines.append(f"视频评论已提交，群分享处理失败：{type(exc).__name__}")
         return "\n".join(lines) or "本轮没有符合条件的新视频"
 
+    async def _journal_read(self, uid, item, cfg, persona):
+        key = await durable_io(journal.begin, self.store, uid, item, self.clock())
+        closed = False
+        try:
+            await durable_io(self.store.visit, uid, item.bvid, 'journal', self.clock(), 'reading', '{}', False)
+            item, evidence = await self.client.understand(item, cfg.model.content_max_chars)
+            if (self.get_config() != cfg or self.paused or not self.active(cfg) or self.client.uid != uid):
+                await durable_io(journal.finish, self.store, key, uid, 'cancelled', {'reason': '读取期间状态改变'}, self.clock())
+                closed = True
+                return '本次阅读已停止'
+            blocked = self.filter_item(item, cfg) or any(
+                word.strip() and word.casefold() in evidence.text.casefold() for word in cfg.browse.blocked_keywords
+            )
+            if blocked or len(evidence.text.strip()) < 30:
+                reason = '内容已跳过' if blocked else '没有读到足够的正文'
+                await durable_io(journal.finish, self.store, key, uid, 'unread', {'reason': reason}, self.clock())
+                closed = True
+                return reason
+            memories = await durable_io(journal.context, self.store, uid, item)
+            raw = await asyncio.wait_for(self._generate_model(
+                journal.prompt(item, evidence, persona, cfg.browse.interests, memories, self.clock(), cfg.browse.timezone), cfg
+            ), timeout=cfg.model.decision_budget_seconds)
+            reflection = journal.parse(raw, evidence, memories)
+            if self.get_config() != cfg or self.paused or not self.active(cfg) or self.client.uid != uid:
+                await durable_io(journal.finish, self.store, key, uid, 'cancelled', {'reason': '记录前状态改变'}, self.clock())
+                closed = True
+                return '本次感想未保存'
+            payload = {**asdict(reflection), 'source': evidence.source[:100], 'coverage': evidence.coverage[:300],
+                       'related': [h for h in memories if h['id'] in reflection.related_ids]}
+            await durable_io(journal.finish, self.store, key, uid, 'noted' if reflection.thought else 'passed', payload, self.clock())
+            closed = True
+            await self.record(uid, item, 'journal', 'noted' if reflection.thought else 'passed',
+                              json.dumps({'reason': reflection.reason, 'thought': reflection.thought,
+                                          'source': evidence.source}, ensure_ascii=False), retryable=False)
+            if reflection.share_reason and self.reading_sink is not None:
+                try:
+                    await self.reading_sink(uid, item, evidence, reflection)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    return '手记已保存，分享素材暂未登记'
+            return '留下手记：' + reflection.thought if reflection.thought else '读过，暂时没有更多感想：' + reflection.reason
+        except asyncio.CancelledError:
+            if not closed:
+                await durable_io(journal.finish, self.store, key, uid, 'interrupted', {'reason': '本次阅读中断'}, self.clock())
+            raise
+        except Exception as exc:
+            if not closed:
+                await durable_io(journal.finish, self.store, key, uid, 'failed',
+                                 {'reason': '阅读或感想未完成：' + type(exc).__name__}, self.clock())
+            if isinstance(exc, (LoginRequired, PlatformError)):
+                raise
+            return '本次感想未完成，保留阅读记录，不自动重试'
+
     async def status(self) -> str:
         cfg = self.get_config()
         uid = self.client.uid
         stats = await asyncio.to_thread(self.store.stats, uid, local_day_start(self.clock(), cfg.browse.timezone))
-        mode = "自动发布" if cfg.comment.publish_enabled else "预览"
+        mode = "自动发布" if cfg.comment.publish_enabled else "浏览手记"
         behavior = "自主决定刷不刷" if cfg.browse.autonomous_enabled else "固定间隔浏览"
         control = "暂停" if self.paused else "运行"
         choice = await asyncio.to_thread(self.store.latest_browse_decision, uid)

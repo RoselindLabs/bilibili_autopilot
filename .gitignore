@@ -16,3 +16,5 @@ runtime/
 build/
 dist/
 *.egg-info/
+.impeccable/
+.taste-skill/

@@ -311,7 +311,7 @@ def browse_prompt(
         "这里没有提供当前聊天、真实忙碌程度或情绪信息，不要编造这些经历。浏览不等于发表评论。"
         "历史不感兴趣仅代表当时那几个视频，不能据此断言本次推荐也无聊；已经休息一段时间时应重新考虑新内容。"
         "今日分析数量包含手动预览、跳过和失败，不是连续刷了多久，也不能据此推断疲倦。"
-        "推荐只包含标题和简介，尚未观看，不能声称已经看过本批视频；评论仍需之后读取字幕或摘要单独判断。"
+        "推荐只包含标题和简介，尚未观看，不能声称已经看过本批视频；感想需之后读取字幕或摘要才能形成。"
         "只输出一个 JSON 对象，不输出思考过程或其他文字，字段必须为："
         "should_browse(布尔), reason(一句话理由，最多200字), next_check_minutes(下次考虑的间隔分钟数)。"
         "增加 selected_bvids 字段：本轮希望读取的候选 BV 号列表，按兴趣从高到低排序，"
@@ -343,7 +343,7 @@ def browse_prompt(
         (
             item["timestamp"]
             for item in recent
-            if item.get("mode") == "publish" and item["outcome"] not in {"model_error", "read_error", "reading"}
+            if item.get("mode") in {"publish", "journal"} and item["outcome"] not in {"model_error", "read_error", "reading"}
         ),
         default=None,
     )

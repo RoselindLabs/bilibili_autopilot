@@ -528,6 +528,13 @@ class EcosystemSection(PluginConfigBase):
     enabled: bool = Field(default=False, description="允许Neko主动插件领取已读视频资料；启用后不再直接发送评论后群分享，群范围仍用上方share.qq_group_ids")
     min_interest: float = Field(default=0.55, ge=0, le=1, description="进入聊天候选池的最低兴趣分，与评论门槛独立")
     account_id: str = Field(default="", description="可选限定QQ机器人账号；同群多账号不明确时拒绝，不是B站UID")
+    qq_friend_ids: List[str] = Field(default_factory=list, max_length=10,
+        description="允许查询B站手记及接收主动分享的QQ私聊对象；留空不授权，分享还须主动插件允许同一好友")
+
+    @field_validator('qq_friend_ids')
+    @classmethod
+    def validate_friends(cls, values):
+        return ShareSection.validate_groups(values)
     daily_max: int = Field(default=2, ge=1, le=20, description="每群每天素材机会上限，按北京时间计；未确认机会保守占用，明确释放例外，不等于已发送或目标数")
     interval_minutes: int = Field(default=180, ge=1, le=1440, description="同群素材机会最小间隔（分钟），非到点必发；仍须主动插件的时段/概率/冷却通过，不改变其调度")
 

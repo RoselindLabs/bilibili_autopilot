@@ -14,13 +14,14 @@ from maibot_sdk.context import PluginContext
 from local_bilibili_autopilot.config import AutopilotConfig
 from local_bilibili_autopilot.models import Decision, Evidence, VideoItem
 from local_bilibili_autopilot.reading_bridge import ReadingBridge, ReadingStore, PROVIDER, CLIENT, io
+from local_bilibili_autopilot.journal import Reflection
 import test_autopilot as upstream_tests
 
 ITEM = VideoItem("BV1234567890", 123, "一条具体的视频", "2", "UP", 90)
 EVIDENCE = Evidence(
     "字幕", "这是一段已实际读取的字幕来源，用于合成测试阅读资料，不涉及真实平台，也不会调用任何模型或发送消息。"
 )
-DECISION = Decision(False, 0.8, "", "感兴趣但没有必要发表评论", "")
+DECISION = Reflection('对这段资料产生了自己的看法', '有具体内容', '一段已实际读取的字幕来源', '测试阅读', (), '值得和相关对象聊聊')
 TASK = "proactive:neko.proactive:1792930000000"
 
 
@@ -45,13 +46,11 @@ class AutomaticReadTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_non_comment_read_is_forwarded_with_publish_disabled_without_extra_generation(self):
         self.cfg.comment.publish_enabled = False
-        self.generate.return_value = upstream_tests.decision(
-            should_comment=False, interest=0.8, comment="", evidence_quote=""
-        )
+        self.generate.return_value = upstream_tests.reflection()
         sink = self.engine.reading_sink = AsyncMock()
         await self.engine.start()
         result = await self.engine.round()
-        self.assertIn("看过不评论", result)
+        self.assertIn("留下手记", result)
         sink.assert_awaited_once()
         self.generate.assert_awaited_once()
         self.client.publish.assert_not_awaited()

@@ -29,6 +29,14 @@ def decision(**changes):
     return json.dumps(fields, ensure_ascii=False)
 
 
+def reflection(**changes):
+    fields = {'thought': '发光除了吸引猎物，还可以传递信号，让我重新理解了深海里的光。',
+              'reason': '发光的多重用途很有意思', 'evidence_quote': '深海生物利用发光器官吸引猎物',
+              'topic': '深海交流', 'related_ids': [], 'share_reason': '可以聊聊同一种光为何有不同用途'}
+    fields.update(changes)
+    return json.dumps(fields, ensure_ascii=False)
+
+
 class EngineTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = TemporaryDirectory()
@@ -66,11 +74,13 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.stats("1001", 0)["attempts"], 0)
         self.assertTrue(self.engine.paused)
 
-    async def test_scheduled_preview_when_switch_off(self):
+    async def test_scheduled_journal_when_switch_off(self):
         self.cfg.comment.publish_enabled = False
+        self.generate.return_value = reflection()
         await self.engine.start()
-        self.assertIn("预览评论", await self.engine.round())
+        self.assertIn("留下手记", await self.engine.round())
         self.client.publish.assert_not_awaited()
+        self.engine.review.assert_not_awaited()
 
     async def test_share_callback_runs_after_success_is_persisted(self):
         async def share(uid, item):

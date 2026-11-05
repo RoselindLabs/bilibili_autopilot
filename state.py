@@ -12,6 +12,7 @@ import sqlite3
 import time
 
 from .models import IncomingReply, VideoItem, next_local_day, normalized
+from . import journal
 
 
 RETRY_OUTCOMES = {"read_error", "model_error", "model_timeout", "invalid_decision"}
@@ -212,6 +213,7 @@ class StateStore:
             db.execute(
                 "UPDATE video_shares SET status='unknown',detail='进程中断，群分享结果待核对；不会自动重发' WHERE status='pending'"
             )
+            journal.initialize(db)
         self.path.chmod(0o600)
 
     def _recover_interrupted(self, db: sqlite3.Connection, now: float) -> None:
@@ -345,6 +347,13 @@ class StateStore:
         check_deadline = now is not None
         now = time.time() if now is None else now
         with self.connect() as db:
+            if mode == 'journal':
+                last = db.execute('SELECT started,status FROM journal WHERE uid=? AND bvid=? ORDER BY started DESC LIMIT 1',
+                                  (uid, bvid)).fetchone()
+                # A completed read can be revisited after a week. Failed/unknown work
+                # is not an automatic model retry queue, including across restarts.
+                return bool(last and (last['status'] not in {'noted', 'passed', 'unread'}
+                                      or now - last['started'] < journal.REVISIT_SECONDS))
             if db.execute("SELECT 1 FROM attempts WHERE uid=? AND bvid=?", (uid, bvid)).fetchone():
                 return True
             row = db.execute("SELECT * FROM visits WHERE uid=? AND bvid=? AND mode=?", (uid, bvid, mode)).fetchone()

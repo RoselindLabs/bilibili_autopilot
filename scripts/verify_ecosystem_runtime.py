@@ -20,7 +20,7 @@ async def verify(args):
         instance = Path(cleanup.enter_context(tempfile.TemporaryDirectory(prefix="bili-ecosystem-"))).resolve()
         cleanup.callback(os.chdir, Path.cwd())
         os.chdir(instance)
-        os.environ.update(MAIBOT_INSTANCE_DIR=str(instance), MAIBOT_HOST_VERSION="1.3.15", MAIBOT_LOCALE="zh-CN")
+        os.environ.update(MAIBOT_INSTANCE_DIR=str(instance), MAIBOT_HOST_VERSION="1.3.19", MAIBOT_LOCALE="zh-CN")
         if args.extra_site:
             sys.path.insert(0, str(args.extra_site.resolve()))
         sys.path.insert(0, str(args.host_source.resolve()))
@@ -50,6 +50,7 @@ async def verify(args):
                     "sharing.py",
                     "reading_bridge.py",
                     "activity.py",
+                    "journal.py",
                     "webui.py",
                 ],
             ),
@@ -63,6 +64,7 @@ async def verify(args):
                     "life_bridge.py",
                     "bilibili_bridge.py",
                     "prompt_visibility.py",
+                    "wake_store.py", "repeat.py", "dayplan.py", "time_input.py", "webui.py",
                 ],
             ),
         ]:
@@ -71,11 +73,11 @@ async def verify(args):
             for f in files:
                 shutil.copyfile(root / f, target / f)
         (plugins / "bilibili/config.toml").write_text(
-            '[plugin]\nconfig_version="0.2.0"\nenabled=true\n[browse]\nauto_start=false\n[ecosystem]\nenabled=true\n[share]\nqq_group_ids=["123456"]\n',
+            '[plugin]\nconfig_version="0.2.0"\nenabled=true\n[browse]\nauto_start=false\n[ecosystem]\nenabled=true\nqq_friend_ids=["654321"]\n[share]\nqq_group_ids=["123456"]\n',
             encoding="utf-8",
         )
         (plugins / "proactive/config.toml").write_text(
-            '[plugin]\nconfig_version="2.0.0"\nenabled=true\n[scheduler]\nenabled=false\n[target]\nallowed_groups=["123456"]\n[life]\nenabled=false\n[bilibili]\nenabled=true\n',
+            '[plugin]\nconfig_version="2.0.0"\nenabled=true\n[scheduler]\nenabled=false\n[target]\nallowed_groups=["123456"]\nallowed_friends=["654321"]\n[life]\nenabled=false\n[bilibili]\nenabled=true\n',
             encoding="utf-8",
         )
         runner = PluginRunner(
@@ -94,7 +96,7 @@ async def verify(args):
             capability, body = payload["capability"], payload["args"]
             calls.append(capability)
             if capability == "config.get":
-                value = {"success": True, "value": body.get("default", "")}
+                value = {"success": True, "value": "789" if body.get('key') == 'bot.qq_account' else body.get("default", "")}
             elif capability == "chat.get_group_streams":
                 value = {
                     "success": True,
@@ -108,6 +110,15 @@ async def verify(args):
                         }
                     ],
                 }
+            elif capability == 'chat.get_private_streams':
+                value = {'success': True, 'streams': [{'session_id':'private','user_id':'654321','group_id':'',
+                         'account_id':'789','platform':'qq','chat_type':'private'}]}
+            elif capability in ('chat.get_stream_by_group_id', 'chat.get_stream_by_user_id'):
+                private = capability.endswith('user_id')
+                value = {'success': True, 'stream': {'session_id':'private' if private else 'chat',
+                         'user_id':'654321' if private else '', 'group_id':'' if private else '123456',
+                         'account_id':'789','platform':'qq','is_group_session':not private,
+                         'chat_type':'private' if private else 'group'}}
             elif capability == "api.call":
                 assert body["api_name"] == "local.bilibili-autopilot.discovery_v1"
                 request = Envelope(
@@ -156,11 +167,14 @@ async def verify(args):
             evidence = domain.Evidence(
                 "字幕", "这段字幕是本次隔离测试的合成来源，长度足够形成有依据的阅读资料，不涉及任何真实平台或账号。"
             )
-            decision = domain.Decision(False, 0.8, "", "有趣但不必评论", "")
+            journal = importlib.import_module(type(bili).__module__.rsplit('.', 1)[0] + '.journal')
+            decision = journal.Reflection('真实合成感想', '有趣但不必评论', '本次隔离测试的合成来源', '合成话题', (), '想与相关对象聊聊')
             await bili._remember_reading("1001", item, evidence, decision)
             pro_domain = importlib.import_module(type(proactive).__module__)
             state = pro_domain.ChatStreamState("chat", "123456", is_group=True)
             proactive._states = {(True, "123456"): state}
+            proactive._bot_qq = '789'
+            proactive._wake_ready = True
             assert await proactive._do_proactive_chat(state, "123456")
             assert len(triggers) == 1 and "合成来源" not in str(triggers)
             reason = triggers[0]["reason"]
@@ -177,10 +191,19 @@ async def verify(args):
             assert "合成来源" in str(answer), answer
             second = await proactive.filter_planner_tasks(**answer["modified_kwargs"])
             assert "合成来源" not in str(second)
+            private = pro_domain.ChatStreamState('private', '654321', is_group=False)
+            proactive._states[(False, '654321')] = private
+            assert await proactive._do_proactive_chat(private, '654321')
+            text = text.replace(reason, triggers[-1]['reason'])
+            answer = await proactive.filter_planner_tasks(session_id='private',
+                items=[{'item_type':'UserMessageItem','parts':[{'type':'text','text':text}]}])
+            assert '真实合成感想' in str(answer) and 'possible_conversation' in str(answer)
+            assert len(triggers) == 2
             assert not bili.config.comment.publish_enabled
             result = {
                 "real_host_runner_two_plugins": True,
                 "real_sdk_signed_api_roundtrip": True,
+                "explicit_private_and_group_handoffs": True,
                 "body_absent_from_task_history": True,
                 "request_only_material_once": True,
                 "comments_remain_disabled": True,

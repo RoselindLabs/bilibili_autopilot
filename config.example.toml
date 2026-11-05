@@ -156,3 +156,13 @@ total_timeout_seconds = 120
 # 默认空为不授权，每项填已有QQ群号，最多10个；同时约束历史查询。生态开启时仍保留名单，主动分享与Proactive名单取交集，不授权私聊。生态关闭时才用于评论后直接分享。
 qq_group_ids = []
 
+[ecosystem]
+# 使用现有主动聊天出口，仍须双方允许同一聊天。
+enabled = false
+min_interest = 0.55
+account_id = ""
+# 明确授权的QQ私聊对象；留空不开放，不继承全部好友。
+qq_friend_ids = []
+daily_max = 2
+interval_minutes = 180
+

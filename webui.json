@@ -1,13 +1,31 @@
 {
   "schema_version": 2,
   "required_capabilities": [
-    "declarative_basic"
+    "declarative_basic",
+    "custom_pages"
   ],
-  "workspace_title": "B站自主浏览",
+  "workspace_title": "B站手记",
   "pages": [
     {
-      "id": "manage",
-      "title": "B站自主浏览管理",
+      "id": "manage", "title": "B站手记", "description": "随刷随记，回看每天留下的感想。",
+      "placement": "sidebar", "icon": "list", "mode": "custom", "entry": "journal.html", "layout": "document",
+      "queries": {
+        "overview": {"api": "autopilot_overview", "parameters": {}},
+        "journal": {"api": "reading_journal", "parameters": {
+          "day": {"type": "string", "max_length": 10},
+          "before": {"type": "string", "max_length": 32},
+          "query": {"type": "string", "max_length": 200}
+        }}
+      },
+      "actions": {
+        "command": {"api": "autopilot_command", "parameters": {
+          "command": {"type": "string", "required": true, "choices": ["/bili_auto start", "/bili_auto pause", "/bili_auto login", "/bili_auto status"]}
+        }}
+      }
+    },
+    {
+      "id": "legacy",
+      "title": "旧记录与管理",
       "description": "查看麦麦的浏览意愿、视频记录和评论结果，也可直接执行管理指令。页面每 5 秒刷新。",
       "placement": "sidebar",
       "icon": "chart",

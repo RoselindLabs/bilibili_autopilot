@@ -9,6 +9,8 @@ import contextlib
 import json
 import re
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -33,7 +35,8 @@ from .models import (
 )
 from .sharing import SHARE_OUTCOMES, VideoSharer
 from .state import StateStore
-from .reading_bridge import ReadingBridge, authorized_group, io as discovery_io
+from .reading_bridge import ReadingBridge, authorized_chat, io as discovery_io
+from . import journal
 from .webui import local_time, record_row
 
 
@@ -146,16 +149,15 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
 
     def _history_policy(self):
         return (self.config.plugin.enabled, tuple(self.config.share.qq_group_ids),
-                self.config.ecosystem.account_id, self.client.uid if self.client else "",
-                self._history_closed)
+                 self.config.ecosystem.account_id, self.client.uid if self.client else "",
+                 self._history_closed, tuple(self.config.ecosystem.qq_friend_ids))
 
     async def _history_scope(self, session):
         policy = self._history_policy()
-        if not policy[0] or not policy[1] or not policy[3] or policy[4] or not session:
+        if not policy[0] or not (policy[1] or policy[5]) or not policy[3] or policy[4] or not session:
             return None
         try:
-            streams = await asyncio.wait_for(self.ctx.chat.get_group_streams(platform="qq"), timeout=2)
-            stream = authorized_group(streams, session, policy[1], policy[2])
+            stream = await authorized_chat(self.ctx, session, policy[1], policy[5], policy[2])
             if self._history_policy() == policy:
                 return policy, str(stream["account_id"])
         except Exception:
@@ -223,21 +225,21 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
 
     @Tool(
         "bilibili_autopilot_history",
-        brief_description="在已授权QQ群查询麦麦的B站浏览、评论及跟进事实，区分草稿和未知结果",
+        brief_description="回忆自己刷B站的感想与经历；在已授权聊天查询真实手记或旧评论",
         detailed_description=(
             "当用户问你最近在 B 站/bilibili 刷了什么、看了什么、评论了什么、回复了谁，"
             "或回忆自己刷 B 站的经历时，先用本工具查真实记录再回答。"
             "包括后台自主浏览；不要因为当前聊天没有记录就回答不知道。"
             "这是只读查询，不会刷视频或发评论。"
-            "仅现有share.qq_group_ids授权群及ecosystem.account_id允许的QQ账号可查，不开放私聊。"
+            "仅share.qq_group_ids授权群、ecosystem.qq_friend_ids授权私聊及指定QQ账号可查。"
             "query 用简短标题关键词、UP 主名、评论关键词或 BV 号，不要填整句问题。"
-            "最近浏览用 browse，已写的评论用 comments，跟进用 replies，综合用 all。"
+            "感想用 journal，最近浏览用 browse，旧评论用 comments，跟进用 replies，综合用 all。"
             "默认查最近7天；需要更早记录可增大 days，0 表示全部历史。"
             "区分已发送、预览草稿、失败与未知结果，只按返回事实自然回答。"
         ),
         parameters={
             "query": {"type": "string", "description": "关键词或 BV 号；留空查询最近记录", "default": ""},
-            "kind": {"type": "string", "enum": ["all", "browse", "comments", "replies"], "default": "all"},
+            "kind": {"type": "string", "enum": ["all", "browse", "comments", "replies", "journal"], "default": "all"},
             "days": {"type": "integer", "minimum": 0, "maximum": 3650, "default": 7,
                      "description": "最近多少天，0 表示不限时间"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
@@ -255,7 +257,7 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
         scope = await self._history_scope(session)
         if scope is None:
             self._history_handoff.turns.pop(session, None)
-            return {"success": False, "content": "当前聊天未获B站资料群授权，或QQ会话身份暂不可核验。"}
+            return {"success": False, "content": "当前聊天未获B站资料授权，或QQ会话身份暂不可核验。"}
         uid = self.client.uid
         try:
             result = await asyncio.to_thread(
@@ -541,7 +543,7 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
             if cfg.browse.autonomous_enabled
             else "定时运行中",
             "mode": ("评论及跟进回复暂缓（发送结果待核对，浏览继续）"
-                     if stats["unresolved"] else "允许自动评论") if cfg.comment.publish_enabled else "仅预览评论",
+                      if stats["unresolved"] else "允许自动评论") if cfg.comment.publish_enabled else "浏览手记 · 不发表评论",
             "candidate_pool": await self.engine.candidate_pool_status(),
             "comment_cooldown": (self.engine.publication_hold(stats)
                                  or self.engine.comment_cooldown(stats, cfg) or "已满足发送间隔")
@@ -600,6 +602,22 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
             "pagination": data["pagination"],
             "is_reply": kind in {"replies", "reply_attempts"},
         }
+
+    @API('reading_journal', description='按天阅读已保存的B站手记，不触发浏览或模型', version='1')
+    async def reading_journal(self, day: str = '', before: str = '', query: str = ''):
+        assert self.engine is not None and self.client is not None
+        uid, cfg = self.client.uid, self.config
+        today = datetime.fromtimestamp(self.engine.clock(), ZoneInfo(cfg.browse.timezone)).strftime('%Y-%m-%d')
+        chosen_day = today if day == 'today' else day
+        result = await discovery_io(journal.page, self.engine.store, uid, cfg.browse.timezone, chosen_day, before, query)
+        if self.discovery is not None:
+            summaries = await discovery_io(self.discovery.store.journal_shares, uid, result['entries'])
+            for entry in result['entries']:
+                entry['sharing'] = summaries.get(entry['id'], '')
+        if self.client.uid != uid or self.config != cfg or self._history_closed:
+            raise ValueError('账号或配置已改变，请刷新手记')
+        result.update(today=today, day=chosen_day, logged_in=bool(uid))
+        return result
 
     @API("autopilot_command", description="执行 B 站插件自身的管理指令，不执行系统命令", version="1")
     async def autopilot_command(self, command: str) -> Dict[str, Any]:

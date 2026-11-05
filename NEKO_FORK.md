@@ -1,5 +1,15 @@
 # Neko Bilibili maintenance fork
 
+0.10.0 turns automatic reading with publication disabled into an independent journal.
+Append-only experiences live in the existing state database (20,000 entries, no automatic deletion),
+with bounded real-history context and source quotes, not renamed comment drafts. A week-old
+completed reading may be revisited if recommended again. Interrupted/failed reflections never replay.
+The custom journal page uses the Host management bridge; legacy administration remains available.
+Explicit `ecosystem.qq_friend_ids` defaults empty; private scope resolution requires the declared
+`chat.get_private_streams` capability and both sides' existing grants for proactive sharing.
+Neko Proactive 2.9.4 preserves reflection and conversation relevance within the original prompt budget.
+Old comments, unknowns and all handoff tombstones survive; rollback keeps the latest database.
+
 Upstream: [namchengwuqiu/bilibili_autopilot](https://github.com/namchengwuqiu/bilibili_autopilot),
 starting from `bf362a6364421a7c6ac3fcf90ad62f47a227d9a1` (0.7.1). Original MIT LICENSE,
 author attribution and history remain intact. Fork contributions: NekoLaska.
