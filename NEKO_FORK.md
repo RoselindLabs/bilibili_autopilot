@@ -60,11 +60,16 @@ Local QA: `python scripts/run_tests.py`, `python scripts/check_archive.py`.
 All fixtures use synthetic data/mocked IPC; no paid/model/QQ/Bilibili mutations.
 
 CI timing: the test runner prints the slowest 20 cases including setup/cleanup.
-Windows CI uses `python -X utf8 scripts/run_tests.py --workers 2`: two isolated
+Optional `python -X utf8 scripts/run_tests.py --workers 2` uses two isolated
 processes split whole modules, retaining original SQLite files and durability,
 asyncio settings, class fixtures and every test. The parent checks each child's
 exit code, discovered IDs, executed count and zero skips against the full suite;
-missing reports, worker failure or incomplete coverage fail the job. Linux keeps
-the single-process full run. No additional runner job or runtime deployment is needed.
+missing reports, worker failure or incomplete coverage fail the job. Both CI platforms
+use the single-process full run: hosted Windows parallel measurement regressed to
+349s vs the prior serial 245.6s, despite the local benefit below. No runtime deployment is needed.
 Local paired measurement on 2026-11-05: 337 cases, serial 65.656s vs two-process
 49.530s wall (including child startup); hosted runner timings can differ.
+Business fixtures now copy a pristine schema created once by the real initializer,
+then run normal initialization, transactions and restart recovery on their own files.
+Store/migration tests still build from scratch. No shared mutable database, SQLite
+durability bypass, production change or dropped test is involved.

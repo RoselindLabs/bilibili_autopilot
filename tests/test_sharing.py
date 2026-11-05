@@ -9,7 +9,7 @@ import unittest
 from local_bilibili_autopilot.config import AutopilotConfig
 from local_bilibili_autopilot.models import DecisionValidationError, ModelTimeoutError, VideoItem, parse_share_text, share_prompt
 from local_bilibili_autopilot.sharing import VideoSharer
-from local_bilibili_autopilot.state import StateStore
+from store_fixture import fresh_store
 from local_bilibili_autopilot.webui import record_row
 
 
@@ -24,7 +24,7 @@ class SharingTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
-        self.store = StateStore(Path(self.temp.name) / "state.sqlite3")
+        self.store = fresh_store(Path(self.temp.name) / "state.sqlite3")
         self.store.initialize(); self.store.set_pause(False, "")
         self.cfg = AutopilotConfig()
         self.cfg.share.qq_group_ids = [GROUP]

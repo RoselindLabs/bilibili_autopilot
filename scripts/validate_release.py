@@ -21,7 +21,7 @@ FILES = (
     "tests/test_autopilot.py", "tests/test_client_plugin.py", "tests/test_recovery.py", "tests/test_replies.py",
     "tests/test_sharing.py", "tests/test_webui.py", "tests/test_handoff.py", "tests/test_candidates.py",
     "tests/test_ecosystem.py", "NEKO_FORK.md",
-    "tests/test_activity.py", "tests/test_login_diagnostics.py", "tests/test_journal.py", "tests/test_cover.py",
+    "tests/test_activity.py", "tests/test_login_diagnostics.py", "tests/test_journal.py", "tests/test_cover.py", "tests/store_fixture.py",
 )
 
 

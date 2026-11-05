@@ -15,6 +15,7 @@ from local_bilibili_autopilot.engine import Autopilot
 from local_bilibili_autopilot.models import (Evidence, IncomingReply, ModelResponseError, ModelTimeoutError, VideoItem, active_time, local_day_start,
                                            parse_browse_decision, parse_decision, recommendations)
 from local_bilibili_autopilot.state import StateStore
+from store_fixture import fresh_store
 
 
 ITEM = VideoItem("BV1234567890", 100, "深海生物的光", "2002", "科普UP", 180)
@@ -57,7 +58,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.client.publish.return_value = "9988"
         self.generate = AsyncMock(return_value=decision())
         self.persona = AsyncMock(return_value="好奇、喜欢海洋生物")
-        self.store = StateStore(Path(self.temp.name) / "state.sqlite3")
+        self.store = fresh_store(Path(self.temp.name) / "state.sqlite3")
         self.engine = Autopilot(self.client, self.store, lambda: self.cfg, self.generate, self.persona, lambda: self.now, review=AsyncMock(return_value=json.dumps({"supported":True,"kind":"factual","reason":"模拟复核通过"})))
         await self.engine.initialize()
 
@@ -709,6 +710,24 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
 
 
 class StoreTests(unittest.TestCase):
+    def test_business_fixture_is_pristine_isolated_and_runs_restart_recovery(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            original = StateStore(root / 'original.sqlite3')
+            original.initialize(now=0)
+            first, second = fresh_store(root / 'first.sqlite3'), fresh_store(root / 'second.sqlite3')
+            with original.connect() as db:
+                expected = '\n'.join(db.iterdump())
+            with first.connect() as db:
+                self.assertEqual('\n'.join(db.iterdump()), expected)
+            first.set_pause(False, '')
+            self.assertEqual(first.reserve('1', ITEM.bvid, 'fixture decision', 100, 0, 10, 0, .9), 'reserved')
+            first.initialize(now=101)
+            with first.connect() as db:
+                self.assertEqual(db.execute('SELECT status FROM attempts').fetchone()[0], 'unknown')
+            with second.connect() as db:
+                self.assertEqual('\n'.join(db.iterdump()), expected)
+
     def setUp(self):
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
