@@ -14,7 +14,8 @@
       "journal": {"api": "reading_journal", "parameters": {
         "day": {"type": "string", "max_length": 10},
         "before": {"type": "string", "max_length": 32},
-        "query": {"type": "string", "max_length": 200}
+        "query": {"type": "string", "max_length": 200},
+        "status": {"type": "string", "choices": ["all", "read", "failed", "unread", "passed", "cancelled", "reading"]}
       }},
       "records": {"api": "autopilot_records", "parameters": {
         "kind": {"type": "string", "choices": ["visits", "attempts", "decisions", "replies", "reply_attempts", "shares"]},

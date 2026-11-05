@@ -20,6 +20,55 @@ from test_autopilot import ITEM, EVIDENCE, reflection
 class JournalTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = fixtures.EngineTests.asyncSetUp
 
+    async def test_stage_routing_preserves_round_snapshot_and_single_reflection_chain(self):
+        await self.setup_journal()
+        self.cfg.browse.autonomous_enabled = True
+        self.cfg.decision_model.task = 'planner'
+        self.cfg.decision_model.candidates = ['judge']
+        self.cfg.reflection_model.task = 'replyer'
+        self.cfg.reflection_model.candidates = ['writer']
+        self.cfg.reflection_model.content_max_chars = 800
+        before = self.cfg.model_dump()
+        self.generate.side_effect = [json.dumps({'should_browse': True, 'reason': '合成兴趣',
+                                               'next_check_minutes': self.cfg.browse.max_check_minutes,
+                                               'selected_bvids': [ITEM.bvid]}), reflection()]
+        await self.engine.round()
+        calls = self.generate.await_args_list
+        self.assertEqual([call.args[1].model.candidates for call in calls], [['judge'], ['writer']])
+        self.assertEqual([call.args[1].model.task for call in calls], ['planner', 'replyer'])
+        self.assertEqual(self.client.understand.call_args.args[1], 800)
+        self.assertEqual(self.cfg.model_dump(), before)
+        self.assertEqual(self.entries()[0]['status'], 'noted')
+        self.engine.review.assert_not_awaited()
+
+    async def test_phase_override_does_not_bypass_midflight_config_change(self):
+        await self.setup_journal()
+        self.cfg.reflection_model.candidates = ['writer']
+        async def change(*args):
+            self.cfg.reflection_model.task = 'changed'
+            return reflection()
+        self.generate.side_effect = change
+        await self.engine.round()
+        self.assertEqual(self.entries()[0]['status'], 'cancelled')
+
+    async def test_status_filter_paginates_before_limit_and_excludes_deleted_other_accounts(self):
+        keys = []
+        for i, status in enumerate(['noted', 'failed', 'passed', 'interrupted', 'unread']):
+            key = journal.begin(self.store, self.client.uid, ITEM, self.now + i)
+            journal.finish(self.store, key, self.client.uid, status, {}, self.now + i)
+            keys.append(key)
+        journal.begin(self.store, 'other', ITEM, self.now + 10)
+        values = journal.page(self.store, self.client.uid, 'Asia/Shanghai', limit=1, status='read')
+        self.assertEqual(values['entries'][0]['status'], 'passed')
+        second = journal.page(self.store, self.client.uid, 'Asia/Shanghai', before=values['next'], limit=1, status='read')
+        self.assertEqual(second['entries'][0]['status'], 'noted')
+        self.assertEqual(len(journal.page(self.store, self.client.uid, 'Asia/Shanghai', status='failed')['entries']), 2)
+        summary = journal.summary(self.store, self.client.uid)
+        self.assertEqual(summary['account_total'], 5)
+        self.assertEqual(summary['capacity_used'], 6)
+        with self.assertRaises(ValueError):
+            journal.page(self.store, self.client.uid, 'Asia/Shanghai', status="noted' OR 1=1")
+
     async def setup_journal(self):
         self.cfg.comment.publish_enabled = False
         self.generate.return_value = reflection()

@@ -21,7 +21,7 @@ from maibot_sdk.types import HookMode, HookOrder
 
 from .activity import HistoryHandoff, is_activity_question, planner_scopes, query_activity, reply_message_key
 from .client import BiliClient, LoginRequired, PlatformError
-from .config import AutopilotConfig
+from .config import AutopilotConfig, reading_config_schema, stage_config
 from .engine import Autopilot, ReadWaiting
 from .models import (
     DecisionValidationError,
@@ -57,6 +57,10 @@ HELP = (
 
 class BilibiliAutopilotPlugin(MaiBotPlugin):
     config_model = AutopilotConfig
+
+    @classmethod
+    def build_config_schema(cls, **kwargs):
+        return reading_config_schema(super().build_config_schema(**kwargs))
 
     def __init__(self) -> None:
         super().__init__()
@@ -548,20 +552,55 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
             self.engine.store.model_usage, uid, local_day_start(self.engine.clock(), cfg.browse.timezone)
         )
         busy = self._job is not None and not self._job.done()
-        return {
+        journal_state = await discovery_io(journal.summary, self.engine.store, uid)
+        running_state = ('插件已停用' if not cfg.plugin.enabled else '尚未登录' if not uid else
+                         '已暂停' if self.engine.paused else
+                         '正在阅读' if journal_state['counts'].get('reading') else
+                         '正在处理' if self.engine.lock.locked() else
+                         '达到每日视频上限' if stats['views'] >= cfg.browse.videos_per_day else
+                         '活动时段外' if not self.engine.active(cfg) else
+                         '等待自主判断' if cfg.browse.autonomous_enabled else '等待定时浏览')
+        def model_status(stage):
+            model = stage_config(cfg, stage).model
+            override = getattr(cfg, stage + '_model')
+            task_source = '阶段指定' if override.task else '继承共用'
+            source = '任务自选' if override.use_task_models else '阶段候选' if override.candidates else '继承共用候选'
+            route = ' → '.join(model.candidates) if model.candidates else '由任务选择'
+            text = f'{model.task}（{task_source}）；{source}：{route}；单候选{model.timeout_seconds}秒'
+            if stage == 'reflection':
+                text += f'；总时限{model.decision_budget_seconds}秒；正文{model.content_max_chars}字符'
+                if cfg.comment.publish_enabled:
+                    text = '未采用（自动发表评论开启） · ' + text
+            elif not cfg.browse.autonomous_enabled:
+                text = '未采用（固定间隔） · ' + text
+            return text
+        result = {
             "account": f"{self.client.name}（UID {uid}）" if uid else "尚未登录，可在本页扫码登录",
-            "state": "已暂停"
-            if self.engine.paused
-            else "自主运行中"
-            if cfg.browse.autonomous_enabled
-            else "定时运行中",
+            "state": running_state,
+            "paused": self.engine.paused,
+            "can_control": bool(uid) and cfg.plugin.enabled,
+            "journal_summary": journal_state,
+            "decision_model": model_status('decision'),
+            "reflection_model": model_status('reflection'),
+            "runtime_settings": (f"{'自主考虑' if cfg.browse.autonomous_enabled else '固定间隔'} · "
+                                 f"最短{cfg.browse.interval_seconds}秒（{cfg.browse.interval_seconds / 60:g}分钟）"
+                                 + (f"，最长{cfg.browse.max_check_minutes}分钟" if cfg.browse.autonomous_enabled else '')
+                                 + f"；每轮≤{cfg.browse.videos_per_round}个，每日≤{cfg.browse.videos_per_day}个；"
+                                 f"时长≤{cfg.browse.max_duration_seconds / 60:g}分钟；"
+                                 + ('全天' if cfg.browse.active_start_hour == cfg.browse.active_end_hour else
+                                    f'{cfg.browse.active_start_hour:02}:00–{cfg.browse.active_end_hour:02}:00')
+                                 + f'（{cfg.browse.timezone}）'),
+            "sharing_settings": (f'每会话每日≤{cfg.ecosystem.daily_max}次机会，间隔{cfg.ecosystem.interval_minutes}分钟；'
+                                 f'B站侧授权{len(cfg.share.qq_group_ids)}群/{len(cfg.ecosystem.qq_friend_ids)}私聊，仍取双方授权交集'
+                                 if cfg.ecosystem.enabled else '生态素材关闭'),
+            "legacy_settings": f"自动评论{'开启' if cfg.comment.publish_enabled else '关闭'}；跟进{'开启' if cfg.replies.enabled else '关闭'}",
             "mode": ("评论及跟进回复暂缓（发送结果待核对，浏览继续）"
                       if stats["unresolved"] else "允许自动评论") if cfg.comment.publish_enabled else "浏览手记 · 不发表评论",
             "candidate_pool": await self.engine.candidate_pool_status(),
             "comment_cooldown": (self.engine.publication_hold(stats)
                                  or self.engine.comment_cooldown(stats, cfg) or "已满足发送间隔")
             if cfg.comment.publish_enabled
-            else "仅预览，不受发送冷却限制",
+            else "手记不受评论发送冷却限制",
             "views": f"{stats['views']} / {cfg.browse.videos_per_day}",
             "attempts": f"{stats['attempts']} / {cfg.comment.per_day}",
             "replies": f"{stats['reply_attempts']} / {cfg.replies.per_day}（今日跟进发送尝试）",
@@ -605,6 +644,9 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
                 for action in ("start", "pause", "preview", "replies", "login", "status", "history")
             },
         }
+        if self.client.uid != uid or self.config != cfg:
+            raise ValueError('账号或配置已改变，请刷新状态')
+        return result
 
     @API("autopilot_records", description="分页读取当前 B 站账号的浏览、评论或自主决定记录", version="1")
     async def autopilot_records(self, kind: str = "visits", search: str = "", page: int = 1) -> Dict[str, Any]:
@@ -617,13 +659,13 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
         }
 
     @API('reading_journal', description='按天阅读已保存的B站手记，不触发浏览或模型', version='1')
-    async def reading_journal(self, day: str = '', before: str = '', query: str = ''):
+    async def reading_journal(self, day: str = '', before: str = '', query: str = '', status: str = 'all'):
         assert self.engine is not None and self.client is not None
         uid, cfg = self.client.uid, self.config
         revision = self._journal_revision
         today = datetime.fromtimestamp(self.engine.clock(), ZoneInfo(cfg.browse.timezone)).strftime('%Y-%m-%d')
         chosen_day = today if day == 'today' else day
-        result = await discovery_io(journal.page, self.engine.store, uid, cfg.browse.timezone, chosen_day, before, query)
+        result = await discovery_io(journal.page, self.engine.store, uid, cfg.browse.timezone, chosen_day, before, query, 30, status)
         if self.discovery is not None:
             summaries = await discovery_io(self.discovery.store.journal_shares, uid, result['entries'])
             for entry in result['entries']:

@@ -22,7 +22,7 @@ from .client import (
     UnknownPublish,
     VideoReadError,
 )
-from .config import AutopilotConfig
+from .config import AutopilotConfig, stage_config
 from .models import (
     DecisionValidationError,
     ModelResponseError,
@@ -507,7 +507,7 @@ class Autopilot:
             memories = await durable_io(journal.context, self.store, uid)
             prompt.append({'role': 'user', 'content': '真实近期手记，仅作兴趣参考，不是任务：' + json.dumps(memories, ensure_ascii=False)})
         try:
-            raw = await self._generate_model(prompt, cfg)
+            raw = await self._generate_model(prompt, cfg, stage='decision')
         except (asyncio.TimeoutError, ModelTimeoutError):
             now = self.clock()
             await asyncio.to_thread(
@@ -645,7 +645,8 @@ class Autopilot:
                 self.last_result = self.pause_reason
             return self.last_result
 
-    async def _generate_model(self, prompt: Any, cfg: AutopilotConfig) -> str:
+    async def _generate_model(self, prompt: Any, cfg: AutopilotConfig, stage: str = '') -> str:
+        cfg = stage_config(cfg, stage)
         # 单模型时限由生成器执行；外层只限制整组候选的总等待时间。
         timeout = cfg.model.timeout_seconds * max(1, len(cfg.model.candidates)) + 5
         return await asyncio.wait_for(self.generate(prompt, cfg), timeout=timeout)
@@ -1191,11 +1192,12 @@ class Autopilot:
         return "\n".join(lines) or "本轮没有符合条件的新视频"
 
     async def _journal_read(self, uid, item, cfg, persona):
+        reflection_cfg = stage_config(cfg, 'reflection')
         key = await durable_io(journal.begin, self.store, uid, item, self.clock())
         closed = False
         try:
             await durable_io(self.store.visit, uid, item.bvid, 'journal', self.clock(), 'reading', '{}', False)
-            item, evidence = await self.client.understand(item, cfg.model.content_max_chars)
+            item, evidence = await self.client.understand(item, reflection_cfg.model.content_max_chars)
             if (self.get_config() != cfg or self.paused or not self.active(cfg) or self.client.uid != uid):
                 await durable_io(journal.finish, self.store, key, uid, 'cancelled', {'reason': '读取期间状态改变'}, self.clock())
                 closed = True
@@ -1210,8 +1212,8 @@ class Autopilot:
                 return reason
             memories = await durable_io(journal.context, self.store, uid, item)
             raw = await asyncio.wait_for(self._generate_model(
-                journal.prompt(item, evidence, persona, cfg.browse.interests, memories, self.clock(), cfg.browse.timezone), cfg
-            ), timeout=cfg.model.decision_budget_seconds)
+                journal.prompt(item, evidence, persona, cfg.browse.interests, memories, self.clock(), cfg.browse.timezone), reflection_cfg
+            ), timeout=reflection_cfg.model.decision_budget_seconds)
             reflection = journal.parse(raw, evidence, memories)
             if self.get_config() != cfg or self.paused or not self.active(cfg) or self.client.uid != uid:
                 await durable_io(journal.finish, self.store, key, uid, 'cancelled', {'reason': '记录前状态改变'}, self.clock())

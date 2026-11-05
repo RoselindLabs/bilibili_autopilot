@@ -539,6 +539,60 @@ class EcosystemSection(PluginConfigBase):
     interval_minutes: int = Field(default=180, ge=1, le=1440, description="同群素材机会最小间隔（分钟），非到点必发；仍须主动插件的时段/概率/冷却通过，不改变其调度")
 
 
+class StageModelSection(PluginConfigBase):
+    """空任务、空候选和0时限继承共用模型；只影响本插件独立后台请求，不加入聊天Planner循环。"""
+
+    task: str = Field(default="", max_length=200, json_schema_extra={
+        "label": "模型任务（空为继承）", "hint": "填写宿主已有任务名，如 planner、replyer。只借用模型路由，不带聊天上下文、工具或记忆。显式候选存在时，改任务不会替换候选模型。"})
+    candidates: List[str] = Field(default_factory=list, json_schema_extra={
+        "label": "候选模型（空为继承）", "hint": "填写宿主已配置的具体模型名，按顺序尝试；非空覆盖共用候选，空继承。候选优先于任务自动选模；要清除继承候选，开启下面的改用任务自选。"})
+    use_task_models: bool = Field(default=False, json_schema_extra={
+        "label": "改用任务自选模型", "hint": "开启时忽略本阶段和共用候选列表，由最终任务选择模型。关闭时按候选继承规则执行。"})
+    timeout_seconds: int = Field(default=0, ge=0, le=180, json_schema_extra={
+        "label": "高级 · 单候选时限（秒，0为继承）", "hint": "0继承共用单候选时限；覆盖值10～180秒。不会修改宿主任务的输出token预算。"})
+
+    @field_validator('task')
+    @classmethod
+    def strip_task(cls, value):
+        return value.strip()
+
+    @field_validator('candidates')
+    @classmethod
+    def normalize_candidates(cls, values):
+        return ModelSection.normalize_candidates(values)
+
+    @field_validator('timeout_seconds')
+    @classmethod
+    def check_timeout(cls, value):
+        if value and value < 10:
+            raise ValueError('单候选时限须为0（继承）或10～180秒')
+        return value
+
+
+class DecisionModelSection(StageModelSection):
+    """仅自主浏览开启时：判断刷不刷、选新视频和下次考虑时间。旧评论候选池选片仍用共用模型。"""
+    __ui_label__ = "自主判断模型"
+    __ui_order__ = 4
+
+
+class ReflectionModelSection(StageModelSection):
+    """仅自动发表评论关闭时生成阅读感想；不影响手动评论预览、旧评论审核或跟进。默认完整继承共用设置。"""
+    __ui_label__ = "阅读感想模型"
+    __ui_order__ = 5
+    decision_budget_seconds: int = Field(default=0, ge=0, le=900, json_schema_extra={
+        "label": "高级 · 感想总时限（秒，0为继承）", "hint": "0继承共用处理总时限；覆盖值20～900秒。全候选共用此时限，不增加审核或润色调用。"})
+    content_max_chars: int = Field(default=0, ge=0, le=24000, json_schema_extra={
+        "label": "高级 · 正文字符预算（0为继承）", "hint": "0继承共用正文预算；覆盖值500～24000字符。仅摘要/字幕，不读取视频画面或音频。"})
+
+    @field_validator('decision_budget_seconds', 'content_max_chars')
+    @classmethod
+    def check_budget(cls, value, info):
+        minimum = 20 if info.field_name == 'decision_budget_seconds' else 500
+        if value and value < minimum:
+            raise ValueError(f'须为0（继承）或至少{minimum}')
+        return value
+
+
 class AutopilotConfig(PluginConfigBase):
     plugin: PluginSection = Field(default_factory=PluginSection)
     browse: BrowseSection = Field(default_factory=BrowseSection)
@@ -547,3 +601,100 @@ class AutopilotConfig(PluginConfigBase):
     replies: ReplySection = Field(default_factory=ReplySection)
     share: ShareSection = Field(default_factory=ShareSection)
     ecosystem: EcosystemSection = Field(default_factory=EcosystemSection)
+    decision_model: DecisionModelSection = Field(default_factory=DecisionModelSection)
+    reflection_model: ReflectionModelSection = Field(default_factory=ReflectionModelSection)
+
+
+def stage_config(cfg: AutopilotConfig, stage: str) -> AutopilotConfig:
+    """Resolve a per-call copy; never mutate persistent values or the round's CAS snapshot."""
+    if stage not in {'decision', 'reflection'}:
+        return cfg
+    override = getattr(cfg, stage + '_model')
+    resolved = cfg.model_copy(deep=True)
+    for name in ('task', 'timeout_seconds', 'decision_budget_seconds', 'content_max_chars'):
+        if value := getattr(override, name, None):
+            setattr(resolved.model, name, value)
+    if override.use_task_models:
+        resolved.model.candidates = []
+    elif override.candidates:
+        resolved.model.candidates = list(override.candidates)
+    return resolved
+
+
+def reading_config_schema(schema):
+    """Use native SectionRenderer.name to group fields without changing TOML paths.
+
+    SDK2.20 emits group/depends_on, but Dashboard1.9.13 does not render them.
+    Its existing section-name mapping supports these groups; every field appears once.
+    """
+    sections = schema['sections']
+    groups = [
+        ('rhythm', 'browse', '浏览节奏与活动时段', '到时间重新考虑，不保证一定刷；暂停须手动恢复。',
+         'auto_start autonomous_enabled interval_seconds max_check_minutes active_start_hour active_end_hour timezone', False),
+        ('limits', 'browse', '阅读上限', '手记和旧评论共用视频额度；上限不是目标，视频数不等于模型调用次数。',
+         'videos_per_round videos_per_day max_duration_seconds', False),
+        ('interests', 'browse', '兴趣与过滤', '手记与旧评论均采用；更积极探索仅影响自主判断。',
+         'interests explore_more blocked_keywords blocked_up_uids max_per_up max_per_topic', False),
+        ('models', 'model', '共用模型与默认预算', '两个阶段未覆盖时沿用这里。显式候选优先于任务选模；任务仍提供输出预算等默认参数。',
+         'task candidates timeout_seconds decision_budget_seconds content_max_chars', False),
+        ('decision_model', 'decision_model', '自主判断模型', DecisionModelSection.__doc__,
+         'task candidates use_task_models timeout_seconds', False),
+        ('reflection_model', 'reflection_model', '阅读感想模型', ReflectionModelSection.__doc__,
+         'task candidates use_task_models timeout_seconds decision_budget_seconds content_max_chars', False),
+        ('ecosystem', 'ecosystem', '主动聊天素材与分享机会', '提供阅读素材，由主动聊天决定采用；这里不是QQ定时发送频率。群授权在下一组。',
+         'enabled daily_max interval_minutes qq_friend_ids account_id min_interest', False),
+        ('group_scope', 'share', 'QQ群资料授权', '与主动插件群名单取交集；不因此授权私聊。', 'qq_group_ids', False),
+        ('plugin', 'plugin', '插件开关与管理员', '总开关与聊天管理命令权限；手记模式由旧评论组的自动发表评论开关决定。',
+         'enabled admin_users config_version', True),
+        ('network', 'browse', '高级 · 读取失败等待', '账号、推荐等只读请求的网络退避，不自动重放失败手记。',
+         'read_retry_base_seconds', True),
+        ('comment', 'comment', '旧功能 · B站评论', '自动发表评论关闭时，自动轮次写手记；本组其余参数只影响旧评论/预览与跟进，不控制手记长度或频率。',
+         'publish_enabled per_day min_interval_seconds max_chars min_interest similarity_threshold', True),
+        ('replies', 'replies', '旧功能 · 跟进评论回复', '开启跟进会检查已有评论的回复并可调用模型；实际发送另需自动发表评论开启。关闭跟进才停止此链。',
+         'enabled interval_seconds per_day analyses_per_day per_thread min_interval_seconds max_age_hours', True),
+        ('comment_pool', 'browse', '旧功能 · 评论候选池', '仅自动发表评论开启时采用；与阅读手记保留容量无关。',
+         'backlog_max_items backlog_max_age_hours', True),
+        ('comment_model', 'model', '旧功能 · 评论风格与依据复核', '仅旧评论、跟进和直接分享使用。阅读感想不走复核/润色链，手记本身保留至主动整理。',
+         'extra_style review_timeout_seconds evidence_retention_days', True),
+        ('direct_share', 'share', '旧功能 · 评论后直接群分享', '仅生态素材关闭且新B站评论提交成功后运行；生态开启时整组不参与主动聊天。',
+         'polish_enabled polish_model polish_timeout_seconds total_timeout_seconds', True),
+    ]
+    overrides = {
+        'plugin.enabled': ('启用插件', '关闭停止后台业务。开启不解除手动或异常暂停；登录后是否自动开始见浏览节奏。'),
+        'browse.autonomous_enabled': ('自主决定刷不刷', '开启：先判断是否浏览、选择新视频与下次考虑；关闭：按最短间隔固定浏览。到时间不保证一定刷。'),
+        'browse.explore_more': ('更积极探索', '仅自主判断开启时生效：更愿意尝试感兴趣的新视频，仍可休息，不保证阅读数量。'),
+        'browse.videos_per_round': ('每轮最多阅读视频数', '每轮最多读取分析的视频数，1～10；是上限而非目标。旧评论模式每轮最多发1条，手记不受这条发送限制。'),
+        'browse.videos_per_day': ('每日视频阅读上限', '手记与旧评论/手动预览共用，达到上限当天停止新视频分析；按所选时区零点统计。不是每日模型调用次数。'),
+        'browse.max_per_up': ('高级 · 每轮同UP主上限', '同时受每轮视频总上限约束，避免一轮都来自同一个UP主。'),
+        'browse.max_per_topic': ('高级 · 每轮同题材上限', '仅按已有分区题材计数，未知题材不强行分类；同时受每轮总上限约束。'),
+        'model.task': ('默认模型任务', '填写宿主已有任务名，默认replyer。判断和感想未覆盖时均继承；有显式候选时只改任务不会改变候选模型。'),
+        'model.candidates': ('默认候选模型（顺序尝试）', '填写宿主已配置的具体模型名；非空优先于任务选模，空由任务选择。超时或无有效正文才尝试下一项，其他失败不保证切换。'),
+        'model.decision_budget_seconds': ('感想与旧评论总时限（秒）', '感想全候选、旧评论/跟进生成及复核共用的总时限，默认240秒＝4分钟。自主判断仍按单候选时限×候选数＋5秒外层保护，不用本项。'),
+        'model.content_max_chars': ('正文字符预算', '摘要或字幕最多提供12000字符，长字幕按片段选择；可由阅读感想阶段覆盖。不是输出token预算，不读取画面或音频。'),
+        'model.extra_style': ('旧评论/直接分享风格', '只补充旧评论、跟进及直接群分享文风。阅读感想使用原人设与兴趣，不使用本项。'),
+        'model.evidence_retention_days': ('旧评论依据缓存天数', '只控制旧评论引用片段的临时依据缓存，不删除手记正文、感想或历史账本。'),
+        'comment.publish_enabled': ('自动发表评论（开启即切旧评论模式）', '关闭：自动浏览写阅读手记，不生成旧评论预览。开启：自动轮次改走旧评论链并可向B站发送。手动preview始终走旧评论预览。'),
+        'ecosystem.enabled': ('向主动聊天提供阅读素材', '开启后沿已有主动聊天出口提供素材，并停用旧评论后直接群分享；需要双方名单授权。'),
+        'ecosystem.daily_max': ('每会话每日素材机会上限', '每群或每私聊分别计数，按北京时间；未知机会保守占用。不是QQ发送量、目标数，也不是每日视频数。'),
+        'ecosystem.interval_minutes': ('同会话机会间隔（分钟）', '群聊和私聊分别计时，非到点必发；实际采用仍由主动聊天的时段、概率与冷却决定。'),
+        'ecosystem.qq_friend_ids': ('允许提供资料的私聊QQ号', '每项一个现有好友QQ号，空不授权私聊；主动分享还须主动插件允许同一好友。'),
+        'ecosystem.account_id': ('高级 · QQ机器人账号限制', '可选限制机器人QQ账号，不是聊天对象或B站UID；同一目标多账号身份不明确时拒绝。'),
+        'ecosystem.min_interest': ('高级 · 素材最低兴趣分', '旧评论使用模型兴趣分。手记不要求模型打分：有感想且有分享缘由记为1，否则为0；还须有分享缘由才登记素材。因此调高本项不会使有分享缘由的完整手记更挑剔。'),
+    }
+    output = {}
+    for order, (key, source, title, description, names, collapsed) in enumerate(groups):
+        fields = {}
+        for position, name in enumerate(names.split()):
+            field = dict(sections[source]['fields'][name], order=position)
+            if presentation := overrides.get(source + '.' + name):
+                field.update(label=presentation[0], hint=presentation[1], description=presentation[1])
+            fields[name] = field
+        output[key] = dict(sections[source], name=source, title=title, description=description,
+                           order=order, collapsed=collapsed, fields=fields)
+    tabs = [('reading', '浏览', ['rhythm', 'limits', 'interests']),
+            ('models', '模型分工', ['models', 'decision_model', 'reflection_model']),
+            ('sharing', '分享机会', ['ecosystem', 'group_scope']),
+            ('advanced', '旧功能与高级', ['plugin', 'network', 'comment', 'replies', 'comment_pool', 'comment_model', 'direct_share'])]
+    return {**schema, 'sections': output, 'layout': {'type': 'tabs', 'tabs': [
+        {'id': key, 'title': title, 'sections': names, 'order': order}
+        for order, (key, title, names) in enumerate(tabs)]}}

@@ -157,7 +157,21 @@ def prompt(item, evidence, persona, interests, history, now, timezone):
     ]
 
 
-def page(store, uid, timezone, day='', before='', query='', limit=30):
+def summary(store, uid):
+    with store.connect() as db:
+        counts = {row[0]: row[1] for row in db.execute(
+            "SELECT status,count(*) FROM journal WHERE uid=? AND status!='deleted' GROUP BY status", (uid,))}
+        total = db.execute("SELECT count(*) FROM journal WHERE status!='deleted'").fetchone()[0]
+    return {'counts': counts, 'account_total': sum(counts.values()), 'capacity_used': total, 'capacity': CAPACITY}
+
+
+def page(store, uid, timezone, day='', before='', query='', limit=30, status='all'):
+    filters = {'all': (), 'read': ('noted', 'passed'), 'failed': ('failed', 'interrupted'),
+               'unread': ('unread',), 'passed': ('passed',), 'cancelled': ('cancelled',), 'reading': ('reading',)}
+    if not isinstance(status, str) or status not in filters:
+        raise ValueError('手记筛选无效')
+    statuses = filters[status]
+    status_sql = ' AND status IN (' + ','.join('?' for _ in statuses) + ')' if statuses else ''
     if not isinstance(day, str) or not isinstance(query, str) or len(query) > 200:
         raise ValueError('日期或搜索词无效')
     if before and (not isinstance(before, str) or not re.fullmatch('[a-f0-9]{32}', before)):
@@ -177,10 +191,10 @@ def page(store, uid, timezone, day='', before='', query='', limit=30):
         boundary = cursor['started'] if cursor else (-1 if day else 1e12)
         rows = db.execute(
             "SELECT * FROM journal WHERE uid=? AND status!='deleted' AND started>=? AND started<? "
-            'AND (?=\'\' OR instr(lower(video||payload),lower(?))>0) '
+            + status_sql + ' AND (?=\'\' OR instr(lower(video||payload),lower(?))>0) '
             f'AND (started{comparison}? OR (started=? AND id{comparison}?)) '
             f'ORDER BY started {direction},id {direction} LIMIT ?',
-            (uid, start, end, query.strip(), query.strip(), boundary,
+            (uid, start, end, *statuses, query.strip(), query.strip(), boundary,
              boundary, cursor['id'] if cursor else '', limit + 1),
         ).fetchall()
     entries = []

@@ -24,6 +24,60 @@ DECISION = json.dumps({"should_comment": True, "interest": 0.9, "comment": "主�
 
 
 class WebUITests(unittest.IsolatedAsyncioTestCase):
+    def test_native_schema_groups_preserve_every_original_path_and_values(self):
+        from local_bilibili_autopilot.config import AutopilotConfig, stage_config
+        cfg = AutopilotConfig.model_validate({'browse': {'interval_seconds': 780, 'max_check_minutes': 21},
+                                             'model': {'task': 'custom_task', 'candidates': ['b', 'a'], 'timeout_seconds': 77,
+                                                       'decision_budget_seconds': 333, 'content_max_chars': 2345}})
+        for stage in ('decision', 'reflection'):
+            self.assertEqual(stage_config(cfg, stage).model, cfg.model)
+        schema = BilibiliAutopilotPlugin.build_config_schema()
+        paths = [(section['name'], name) for section in schema['sections'].values() for name in section['fields']]
+        expected = [(name, field) for name in type(cfg).model_fields for field in type(getattr(cfg, name)).model_fields]
+        self.assertCountEqual(paths, expected)
+        self.assertEqual(len(paths), len(set(paths)))
+        self.assertEqual(schema['layout']['tabs'][0]['sections'], ['rhythm', 'limits', 'interests'])
+        self.assertCountEqual([key for tab in schema['layout']['tabs'] for key in tab['sections']], schema['sections'])
+        # The actual native renderer reads/writes section.name, not the presentation key.
+        draft = cfg.model_dump()
+        for section in schema['sections'].values():
+            for field in section['fields']:
+                draft[section['name']][field] = getattr(getattr(cfg, section['name']), field)
+        self.assertEqual(AutopilotConfig.model_validate(draft), cfg)
+        self.assertIn('600 秒＝10 分钟', schema['sections']['rhythm']['fields']['interval_seconds']['hint'])
+        self.assertIn('不生成旧评论预览', schema['sections']['comment']['fields']['publish_enabled']['hint'])
+        self.assertTrue(schema['sections']['comment_pool']['collapsed'])
+
+    def test_stage_candidate_override_precedence_and_validation(self):
+        from local_bilibili_autopilot.config import AutopilotConfig, stage_config
+        cfg = AutopilotConfig.model_validate({'model': {'candidates': ['one', 'two']},
+                                             'decision_model': {'task': 'planner'},
+                                             'reflection_model': {'candidates': ['writer', 'writer']}})
+        self.assertEqual(stage_config(cfg, 'decision').model.candidates, ['one', 'two'])
+        self.assertEqual(stage_config(cfg, 'decision').model.task, 'planner')
+        self.assertEqual(stage_config(cfg, 'reflection').model.candidates, ['writer'])
+        cfg.decision_model.use_task_models = True
+        self.assertEqual(stage_config(cfg, 'decision').model.candidates, [])
+        self.assertEqual(cfg.model.candidates, ['one', 'two'])
+        for field, value in [('timeout_seconds', 1), ('decision_budget_seconds', 2), ('content_max_chars', 3)]:
+            with self.assertRaises(ValueError):
+                AutopilotConfig.model_validate({'reflection_model': {field: value}})
+
+    async def test_runtime_summary_reports_effective_models_and_paused_state(self):
+        cfg = self.plugin.config.model_dump()
+        cfg['model']['candidates'] = ['inherited']
+        cfg['decision_model']['task'] = 'planner'
+        cfg['comment']['publish_enabled'] = False
+        self.plugin.set_plugin_config(cfg)
+        summary = await self.plugin.autopilot_overview()
+        self.assertEqual(summary['state'], '已暂停')
+        self.assertTrue(summary['paused'])
+        self.assertIn('planner（阶段指定）', summary['decision_model'])
+        self.assertIn('继承共用候选：inherited', summary['decision_model'])
+        self.assertIn('replyer（继承共用）', summary['reflection_model'])
+        self.assertEqual(summary['journal_summary']['account_total'], 0)
+        self.plugin.engine.generate.assert_not_awaited()
+
     async def asyncSetUp(self):
         self.temp = TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -222,7 +276,7 @@ class WebUITests(unittest.IsolatedAsyncioTestCase):
         store.reserve("1", ITEM.bvid, "未知发送的评论", 100, 0, 3, 0, .88)
         store.finish("1", ITEM.bvid, "unknown")
         overview = await self.plugin.autopilot_overview()
-        self.assertEqual(overview["state"], "自主运行中")
+        self.assertEqual(overview["state"], "等待自主判断")
         self.assertIn("暂缓", overview["mode"])
         self.assertIn("浏览继续", overview["comment_cooldown"])
         self.assertEqual(overview["unresolved"], ITEM.bvid)

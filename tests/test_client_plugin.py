@@ -258,6 +258,31 @@ class PluginTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, '{"should_comment": false}')
         generate.assert_awaited_once_with("test prompt", model="replyer", timeout_ms=95000)
 
+    async def test_stage_routes_through_real_sdk_without_tools_or_output_budget_override(self):
+        from maibot_sdk.context import PluginContext
+        from local_bilibili_autopilot.config import stage_config
+        calls = []
+        async def rpc(method, plugin_id, payload, **kwargs):
+            self.assertEqual(method, 'cap.call')
+            self.assertEqual(payload['capability'], 'llm.generate')
+            calls.append(payload['args'])
+            return {'success': True, 'response': '合成响应'}
+        plugin = BilibiliAutopilotPlugin()
+        plugin._ctx = PluginContext('local.bilibili-autopilot', rpc_call=rpc)
+        cfg = AutopilotConfig.model_validate({'model': {'candidates': ['one', 'two']},
+                                             'decision_model': {'task': 'planner'},
+                                             'reflection_model': {'task': 'replyer', 'use_task_models': True}})
+        await plugin._generate('synthetic', stage_config(cfg, 'decision'))
+        await plugin._generate('synthetic', stage_config(cfg, 'reflection'))
+        self.assertEqual(calls[0]['task_name'], 'planner')
+        self.assertEqual(calls[0]['model_name'], 'one')
+        self.assertEqual(calls[1]['model'], 'replyer')
+        self.assertNotIn('model_name', calls[1])
+        for call in calls:
+            self.assertNotIn('max_tokens', call)
+            self.assertNotIn('tools', call)
+            self.assertEqual(call['prompt'], 'synthetic')
+
     async def test_model_timeout_switches_to_a_different_explicit_model(self):
         class RPCTimeout(RuntimeError):
             code = "E_TIMEOUT"
