@@ -13,7 +13,7 @@ import zipfile
 PLUGIN_ID = "local.bilibili-autopilot"
 FILES = (
     "__init__.py", "_manifest.json", "plugin.py", "client.py", "config.py", "engine.py",
-    "models.py", "sharing.py", "reading_bridge.py", "state.py", "webui.py", "webui.json", "icon.png",
+    "models.py", "sharing.py", "reading_bridge.py", "state.py", "activity.py", "webui.py", "webui.json", "icon.png",
     "README.md", "CHANGELOG.md", "LICENSE", "requirements.txt", "pyproject.toml",
     "config.example.toml", "docs/PUBLISHING.md", "docs/MARKETPLACE_SUBMISSION.md", "docs/ICON.md",
     "docs/OPTIMIZATION.md", "docs/share_samples.json", "docs/share_prompt_v063.json",
@@ -21,6 +21,7 @@ FILES = (
     "tests/test_autopilot.py", "tests/test_client_plugin.py", "tests/test_recovery.py", "tests/test_replies.py",
     "tests/test_sharing.py", "tests/test_webui.py", "tests/test_handoff.py", "tests/test_candidates.py",
     "tests/test_ecosystem.py", "NEKO_FORK.md",
+    "tests/test_activity.py", "tests/test_login_diagnostics.py",
 )
 
 
@@ -35,6 +36,23 @@ def validate(root: Path, tag: str | None) -> tuple[str, str]:
     version = manifest["version"]
     if re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)", version) is None:
         raise ValueError("版本号必须是 X.Y.Z")
+    host = manifest["host_application"]
+    checked_versions = {"version": version, "host_application.min_version": host["min_version"]}
+    if "max_version" not in host:
+        raise ValueError("缺少 host_application.max_version：现有宿主加载要求显式声明兼容上限")
+    checked_versions["host_application.max_version"] = host["max_version"]
+    parsed_versions = {}
+    for field, value in checked_versions.items():
+        pattern = r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)"
+        if not isinstance(value, str) or re.fullmatch(pattern, value) is None:
+            raise ValueError(f"{field} 必须是 X.Y.Z")
+        parts = tuple(int(part) for part in value.split("."))
+        if any(part in {99, 999} for part in parts[:2]):
+            raise ValueError(f"{field} 第一位和第二位不能填写 99 或 999")
+        parsed_versions[field] = parts
+    if ("max_version" in host
+            and parsed_versions["host_application.max_version"] < parsed_versions["host_application.min_version"]):
+        raise ValueError("host_application.max_version 不能小于 min_version")
     if tag is not None and tag not in {version, f"v{version}"}:
         raise ValueError("Tag 必须是 manifest 的 X.Y.Z 或 vX.Y.Z")
     repo = manifest["urls"]["repository"]

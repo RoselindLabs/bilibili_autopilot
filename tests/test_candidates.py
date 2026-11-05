@@ -262,16 +262,37 @@ class CandidateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.stats("1", 0)["attempts"], 2)
         self.assertTrue(self.cfg.comment.publish_enabled)
 
-    async def test_unknown_comment_blocks_selection_before_model_or_read(self):
+    async def test_unknown_comment_blocks_candidate_selection_but_not_recommendations(self):
         self.save()
         self.store.reserve("1", "BV0987654321", "待核对评论", self.now, 0, 12, 0, .88)
         self.store.finish("1", "BV0987654321", "unknown")
-        self.assertIn("待核对", await self.engine.round())
+        await self.engine.round()
+        self.assertFalse(self.engine.paused)
+        self.client.recommended.assert_awaited_once()
         self.generate.assert_not_awaited()
         self.client.understand.assert_not_awaited()
         self.client.publish.assert_not_awaited()
         self.assertIn("BV0987654321", self.store.stats("1", 0)["unresolved"])
-        self.assertEqual(len(self.store.candidates("1", now=self.now)), 1)
+        self.assertEqual(len(self.store.candidates("1", now=self.now, ready_only=False)), 1)
+        self.assertEqual(await self.engine.next_check_delay(), self.cfg.browse.interval_seconds)
+
+    async def test_unknown_comment_keeps_new_reading_sink_without_review_or_publish(self):
+        self.save()
+        self.store.reserve("1", "BV0987654321", "待核对评论", self.now, 0, 12, 0, .88)
+        self.store.finish("1", "BV0987654321", "unknown")
+        fresh = replace(ITEM, bvid="BV0000000001")
+        self.client.recommended.return_value = [fresh]
+        self.client.understand.return_value = fresh, EVIDENCE
+        sink = self.engine.reading_sink = AsyncMock()
+        self.assertIn("候选保留中", await self.engine.round())
+        self.assertFalse(self.engine.paused)
+        sink.assert_awaited_once()
+        self.assertEqual(sink.await_args.args[1].bvid, fresh.bvid)
+        self.generate.assert_awaited_once()
+        self.assertIn("[autopilot:candidate]", self.generate.await_args.args[0][0]["content"])
+        self.review.assert_not_awaited()
+        self.client.publish.assert_not_awaited()
+        self.assertEqual(self.store.stats("1", 0)["unresolved"], ["BV0987654321"])
 
     async def test_cancellation_during_selection_survives_reload_without_dense_calls(self):
         self.save()

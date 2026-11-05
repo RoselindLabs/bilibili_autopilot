@@ -59,14 +59,40 @@ class BrowseSection(PluginConfigBase):
 
     __ui_label__ = "浏览与兴趣"
     __ui_order__ = 1
-    backlog_max_items: int = Field(default=24, ge=1, le=100, description="评论候选池上限，超限按兴趣、新鲜度与等待时间择优保留")
-    backlog_max_age_hours: int = Field(default=48, ge=1, le=168, description="评论候选有效期，小时；候选不保证发送")
-    read_retry_base_seconds: int = Field(
-        default=60, ge=10, le=600, description="只读网络失败退避起点，最多四次后每小时探测"
+    backlog_max_items: int = Field(
+        default=24, ge=1, le=100, description="评论候选池上限，超限按兴趣、新鲜度与等待时间择优保留",
+        json_schema_extra={
+            "label": "最多保留的评论候选数",
+            "hint": "默认保留 24 个视频，可填 1～100。评论冷却或额度用完时，感兴趣的视频可留待之后考虑；超出数量时按兴趣、新鲜度和等待时间择优保留，不保证每个候选都会发表评论。",
+        },
     )
-    max_per_up: int = Field(default=2, ge=1, le=10, description="每轮同一 UP 主最多分析的视频数")
+    backlog_max_age_hours: int = Field(
+        default=48, ge=1, le=168, description="评论候选有效期，小时；候选不保证发送",
+        json_schema_extra={
+            "label": "评论候选有效期（小时）",
+            "hint": "默认 48 小时＝2 天，可填 1～168。超过有效期的候选不再等待评论机会；发送前仍需重新读取内容并判断，不会直接发送旧草稿。",
+        },
+    )
+    read_retry_base_seconds: int = Field(
+        default=60, ge=10, le=600, description="只读网络失败退避起点，最多四次后每小时探测",
+        json_schema_extra={
+            "label": "读取失败首次重试等待（秒）",
+            "hint": "读取账号、推荐等请求遇到可重试的网络错误时，首次默认等待 60 秒，可填 10～600。连续失败会逐步延长等待，达到重试上限后每小时探测一次；不会自动重发评论。",
+        },
+    )
+    max_per_up: int = Field(
+        default=2, ge=1, le=10, description="每轮同一 UP 主最多分析的视频数",
+        json_schema_extra={
+            "label": "每轮同一 UP 主视频上限",
+            "hint": "默认每轮最多分析同一 UP 主的 2 个视频，可填 1～10，避免一轮推荐都来自同一个人。仍受每轮视频分析总上限约束。",
+        },
+    )
     max_per_topic: int = Field(
-        default=2, ge=1, le=10, description="每轮同一已知分区题材最多分析的视频数，未知题材不强行分类"
+        default=2, ge=1, le=10, description="每轮同一已知分区题材最多分析的视频数，未知题材不强行分类",
+        json_schema_extra={
+            "label": "每轮同一题材视频上限",
+            "hint": "默认每轮最多分析同一已知分区题材的 2 个视频，可填 1～10，让内容更丰富。没有题材信息的视频不强行归类；仍受每轮视频分析总上限约束。",
+        },
     )
     auto_start: bool = Field(
         default=True,
@@ -284,10 +310,26 @@ class ModelSection(PluginConfigBase):
     __ui_label__ = "模型"
     __ui_order__ = 3
     decision_budget_seconds: int = Field(
-        default=240, ge=20, le=900, description="每条评论或回复生成、复核及一次重生成的总时限"
+        default=240, ge=20, le=900, description="每条评论或回复生成、复核及一次重生成的总时限",
+        json_schema_extra={
+            "label": "评论与回复处理总时限（秒）",
+            "hint": "每条评论或跟进回复从生成到依据复核共用的时间预算，包含最多一次重生成。默认 240 秒＝4 分钟，可填 20～900；达到总时限后停止本次处理，不发送未完成复核的正文。",
+        },
     )
-    review_timeout_seconds: int = Field(default=45, ge=1, le=120, description="单次正文依据复核时限，失败不发送")
-    evidence_retention_days: int = Field(default=7, ge=1, le=30, description="本地引用片段与时间位置保留天数")
+    review_timeout_seconds: int = Field(
+        default=45, ge=1, le=120, description="单次正文依据复核时限，失败不发送",
+        json_schema_extra={
+            "label": "单次正文依据复核时限（秒）",
+            "hint": "检查生成正文是否得到已读取内容支持，默认每次最多等待 45 秒，可填 1～120。超时或复核不通过时不发送该正文，同时受相应处理总时限约束。",
+        },
+    )
+    evidence_retention_days: int = Field(
+        default=7, ge=1, le=30, description="本地引用片段与时间位置保留天数",
+        json_schema_extra={
+            "label": "内容依据缓存保留天数",
+            "hint": "默认保留本地引用片段和时间位置 7 天，可填 1～30，供后续分享等处理查阅。这里只控制内容依据缓存，不是浏览和评论历史记录的保留期限。",
+        },
+    )
     task: str = Field(
         default="replyer",
         description="Host 中用于判断兴趣和生成评论的模型任务",
@@ -425,10 +467,35 @@ class ShareSection(PluginConfigBase):
 
     __ui_label__ = "QQ群授权与旧评论后分享"
     __ui_order__ = 5
-    polish_enabled: bool = Field(default=True, description="仅旧评论后直接QQ分享：每条最多一次模型润色，各群复用；生态开启时本项不参与主动聊天")
-    polish_model: str = Field(default="", max_length=200, description="仅旧直接分享润色的宿主模型名，空为评论任务；不控制生态主动聊天模型")
-    polish_timeout_seconds: int = Field(default=30, ge=1, le=120, description="仅旧直接分享润色及复核的时限（秒）；生态模式不使用")
-    total_timeout_seconds: int = Field(default=120, ge=10, le=360, description="仅旧直接分享草稿/润色/复核的总时限（秒）；不是生态主动聊天超时")
+    polish_enabled: bool = Field(
+        default=True, description="仅旧评论后直接QQ分享：每条最多一次模型润色，各群复用；生态开启时本项不参与主动聊天",
+        json_schema_extra={
+            "label": "润色群分享文案",
+            "hint": "仅生态关闭时的旧直接分享：默认开启，在分享草稿基础上再润色一次，同一视频各群复用；关闭后使用已通过依据复核的初稿。",
+        },
+    )
+    polish_model: str = Field(
+        default="", max_length=200, description="仅旧直接分享润色的宿主模型名，空为评论任务；不控制生态主动聊天模型",
+        json_schema_extra={
+            "label": "分享文案润色模型",
+            "hint": "仅旧直接分享润色使用：填写麦麦已配置的模型名，最多200字；留空沿用评论任务及候选，不影响生态主动聊天。",
+            "placeholder": "留空沿用评论模型，或填写已配置的模型名称",
+        },
+    )
+    polish_timeout_seconds: int = Field(
+        default=30, ge=1, le=120, description="仅旧直接分享润色及复核的时限（秒）；生态模式不使用",
+        json_schema_extra={
+            "label": "分享文案润色时限（秒）",
+            "hint": "仅旧直接分享：润色及复核默认30秒，可填1～120。未完成或未通过时使用已通过复核的初稿，仍受分享总时限约束。",
+        },
+    )
+    total_timeout_seconds: int = Field(
+        default=120, ge=10, le=360, description="仅旧直接分享草稿/润色/复核的总时限（秒）；不是生态主动聊天超时",
+        json_schema_extra={
+            "label": "分享文案处理总时限（秒）",
+            "hint": "仅旧直接分享：草稿/修改/润色/复核共用默认120秒，可填10～360。超时放弃本次群分享，不影响已发布B站评论，不控制生态主动聊天。",
+        },
+    )
     qq_group_ids: List[str] = Field(
         default_factory=list,
         max_length=10,

@@ -214,6 +214,31 @@ class ReadingStore:
             }
 
 
+def authorized_group(streams, session, groups, account_id):
+    """Resolve an existing, unambiguous QQ route using the provider's current grants."""
+    if not isinstance(session, str) or not 0 < len(session) <= 128:
+        raise ValueError("invalid_session")
+    if not isinstance(streams, list) or len(streams) > 512:
+        raise ValueError("unavailable_qq_scopes")
+    owned = [s for s in streams if isinstance(s, dict) and s.get("session_id") == session]
+    if len(owned) != 1:
+        raise ValueError("ambiguous_session")
+    stream = owned[0]
+    group, account = str(stream.get("group_id") or ""), str(stream.get("account_id") or "")
+    matches = [
+        s for s in streams
+        if isinstance(s, dict) and str(s.get("group_id") or "") == group
+        and s.get("platform") == "qq" and s.get("chat_type") == "group"
+        and s.get("session_id") and str(s.get("account_id") or "").isdecimal()
+        and (not account_id or str(s.get("account_id") or "") == account_id)
+    ]
+    if (stream.get("platform") != "qq" or stream.get("chat_type") != "group"
+            or group not in groups or not account.isdecimal() or len(matches) != 1
+            or (account_id and account != account_id)):
+        raise ValueError("unauthorized_qq_scope")
+    return stream
+
+
 class ReadingBridge:
     def __init__(self, context, get_config, get_uid, available, directory):
         self.context, self.get_config, self.get_uid, self.available = context, get_config, get_uid, available
@@ -245,36 +270,9 @@ class ReadingBridge:
             now = time.time()
             operation, body, nonce = await io(authenticate, packet, self.directory, now)
             session = body.get("session_id")
-            if not isinstance(session, str) or not 0 < len(session) <= 128:
-                raise ValueError("invalid_session")
             streams = await asyncio.wait_for(self.context.chat.get_group_streams(platform="qq"), timeout=2)
-            if not isinstance(streams, list) or len(streams) > 512:
-                raise ValueError("unavailable_qq_scopes")
-            owned = [s for s in streams if isinstance(s, dict) and s.get("session_id") == session]
-            if len(owned) != 1:
-                raise ValueError("ambiguous_session")
-            stream = owned[0]
-            group, account = str(stream.get("group_id") or ""), str(stream.get("account_id") or "")
-            matches = [
-                s
-                for s in streams
-                if isinstance(s, dict)
-                and str(s.get("group_id") or "") == group
-                and s.get("platform") == "qq"
-                and s.get("chat_type") == "group"
-                and s.get("session_id")
-                and str(s.get("account_id") or "").isdecimal()
-                and (not snapshot[3] or str(s.get("account_id") or "") == snapshot[3])
-            ]
-            if (
-                stream.get("platform") != "qq"
-                or stream.get("chat_type") != "group"
-                or group not in snapshot[2]
-                or not account.isdecimal()
-                or len(matches) != 1
-                or (snapshot[3] and account != snapshot[3])
-            ):
-                raise ValueError("unauthorized_qq_scope")
+            stream = authorized_group(streams, session, snapshot[2], snapshot[3])
+            account = str(stream["account_id"])
             if self.closed or self.policy() != snapshot or not self.available():
                 raise ValueError("discovery_changed")
             await io(self.store.nonce, nonce, now)

@@ -4,8 +4,9 @@ Upstream: [namchengwuqiu/bilibili_autopilot](https://github.com/namchengwuqiu/bi
 starting from `bf362a6364421a7c6ac3fcf90ad62f47a227d9a1` (0.7.1). Original MIT LICENSE,
 author attribution and history remain intact. Fork contributions: NekoLaska.
 
-0.9.0 integrates official stable tag `v0.8.0`, commit
-`0f15ff0ae44036a772cf3206a4faad36495ed162` (2026-10-28), including v0.7.2.
+0.9.1 integrates upstream `v0.8.7`, commit
+`026ab4f5cdd7f13f967772a6b298ce3b7c9271ce` (2026-11-04), including v0.8.3–v0.8.6.
+0.9.0 previously integrated `v0.8.0` / `0f15ff0ae44036a772cf3206a4faad36495ed162`.
 The upstream version overlaps our original 0.8.0; maintenance versions remain independent.
 Comment candidates now use interest-only screening during cooldown/quota waits and
 independent selection before a fresh read/review. This is Bilibili comment scheduling,
@@ -13,6 +14,18 @@ not a second QQ proactive trigger. Richer direct-share copy applies only outside
 ecosystem mode. No dependency, config-key or table-schema changes; only provable
 legacy capacity evictions gain the `evicted` label. Preserve current publication
 settings, credentials, every send/unknown ledger and discovery tombstone on updates.
+
+0.9.1 adds account-scoped activity queries and per-message fact handoff, explicit
+browse-selection limits, redacted staged login diagnostics, and continued browsing
+while unknown comments/replies block publication. Already-paused instances still
+need an explicit start; unknown records are never acknowledged or replayed automatically.
+History access uses the existing provider QQ group/account grants, including real
+shared-Focus routing; private/unlisted/ambiguous sessions fail closed. This read-only
+history tool does not consume or bypass the signed proactive discovery protocol.
+Upstream's experimental NapCat mini-app card is deliberately excluded: no card API,
+send.custom/api.call permissions, cover fields or card-schema migration. Config format
+remains 0.2.0; business keys, defaults and SQLite schema are unchanged. Explicit host
+compatibility is 1.3.10–1.3.19; the inherited same-SHA CI/package policy is retained.
 
 - Same `local.bilibili-autopilot` ID, runtime directory, credentials and original
   comment/reply/unknown ledgers. Replace the existing directory; never run two copies.

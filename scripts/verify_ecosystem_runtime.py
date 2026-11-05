@@ -49,6 +49,7 @@ async def verify(args):
                     "state.py",
                     "sharing.py",
                     "reading_bridge.py",
+                    "activity.py",
                     "webui.py",
                 ],
             ),

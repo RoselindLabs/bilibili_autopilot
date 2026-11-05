@@ -20,6 +20,11 @@ plugin=module.create_plugin()
 assert not plugin.config_model().ecosystem.enabled
 assert not plugin.config_model().comment.publish_enabled
 assert any(c['name']=='discovery_v1' for c in collect_components(plugin))
+assert any(c['name']=='bilibili_autopilot_history' for c in collect_components(plugin))
+assert 'miniapp_enabled' not in type(plugin.config_model().share).model_fields
+import json
+manifest=json.loads((root/'_manifest.json').read_text(encoding='utf-8'))
+assert not {'send.custom','api.call'} & set(manifest['capabilities'])
 for item in pkgutil.iter_modules([str(root)]):
     if item.name not in {'tests','scripts'}:
         imported=importlib.import_module('packed_bilibili.'+item.name)
