@@ -58,3 +58,13 @@ compatibility is 1.3.10–1.3.19; the inherited same-SHA CI/package policy is re
 
 Local QA: `python scripts/run_tests.py`, `python scripts/check_archive.py`.
 All fixtures use synthetic data/mocked IPC; no paid/model/QQ/Bilibili mutations.
+
+CI timing: the test runner prints the slowest 20 cases including setup/cleanup.
+Windows CI uses `python -X utf8 scripts/run_tests.py --workers 2`: two isolated
+processes split whole modules, retaining original SQLite files and durability,
+asyncio settings, class fixtures and every test. The parent checks each child's
+exit code, discovered IDs, executed count and zero skips against the full suite;
+missing reports, worker failure or incomplete coverage fail the job. Linux keeps
+the single-process full run. No additional runner job or runtime deployment is needed.
+Local paired measurement on 2026-11-05: 337 cases, serial 65.656s vs two-process
+49.530s wall (including child startup); hosted runner timings can differ.
