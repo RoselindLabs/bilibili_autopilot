@@ -23,6 +23,7 @@ import httpx
 import qrcode
 
 from .models import Evidence, IncomingReply, VideoItem, normalized, recommendations
+from .cover import cover_url
 
 
 READ_NETWORK_ERRORS = (asyncio.TimeoutError, httpx.TimeoutException, httpx.NetworkError)
@@ -450,6 +451,7 @@ class BiliClient:
             up_uid=str(info["owner"]["mid"]),
             up_name=str(info["owner"].get("name", ""))[:100],
             topic=str(info.get("tid") or info.get("tname") or item.topic)[:100],
+            cover_url=cover_url(info.get('pic', '')),
         )
         if int(info.get("videos", 1)) > 1:
             return item, Evidence("unavailable", "")

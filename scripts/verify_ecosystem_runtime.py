@@ -51,6 +51,7 @@ async def verify(args):
                     "reading_bridge.py",
                     "activity.py",
                     "journal.py",
+                    "cover.py",
                     "webui.py",
                 ],
             ),

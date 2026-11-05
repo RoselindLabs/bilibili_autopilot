@@ -1210,9 +1210,15 @@ class Autopilot:
                 await durable_io(journal.finish, self.store, key, uid, 'unread', {'reason': reason}, self.clock())
                 closed = True
                 return reason
+            from .cover import load_cover
+            cover = await load_cover(item.cover_url)
+            if self.get_config() != cfg or self.paused or not self.active(cfg) or self.client.uid != uid:
+                await durable_io(journal.finish, self.store, key, uid, 'cancelled', {'reason': '读取封面期间状态改变'}, self.clock())
+                closed = True
+                return '本次阅读已停止'
             memories = await durable_io(journal.context, self.store, uid, item)
             raw = await asyncio.wait_for(self._generate_model(
-                journal.prompt(item, evidence, persona, cfg.browse.interests, memories, self.clock(), cfg.browse.timezone), reflection_cfg
+                journal.prompt(item, evidence, persona, cfg.browse.interests, memories, self.clock(), cfg.browse.timezone, cover), reflection_cfg
             ), timeout=reflection_cfg.model.decision_budget_seconds)
             reflection = journal.parse(raw, evidence, memories)
             if self.get_config() != cfg or self.paused or not self.active(cfg) or self.client.uid != uid:
@@ -1220,7 +1226,10 @@ class Autopilot:
                 closed = True
                 return '本次感想未保存'
             payload = {**asdict(reflection), 'source': evidence.source[:100], 'coverage': evidence.coverage[:300],
+                       'cover_provided': bool(cover),
                        'related': [h for h in memories if h['id'] in reflection.related_ids]}
+            if cover:
+                payload['coverage'] += '；另提供静态封面，未播放视频'
             await durable_io(journal.finish, self.store, key, uid, 'noted' if reflection.thought else 'passed', payload, self.clock())
             closed = True
             await self.record(uid, item, 'journal', 'noted' if reflection.thought else 'passed',

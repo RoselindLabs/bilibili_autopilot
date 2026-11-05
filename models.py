@@ -88,6 +88,7 @@ class VideoItem:
     duration: int
     description: str = ""
     topic: str = ""
+    cover_url: str = ""
 
 
 @dataclass(frozen=True)

@@ -111,6 +111,23 @@ class JournalTests(unittest.IsolatedAsyncioTestCase):
         self.generate.return_value = reflection()
         await self.engine.start()
 
+    async def test_cover_is_ephemeral_and_revocation_during_download_stops_generation(self):
+        await self.setup_journal()
+        with patch('local_bilibili_autopilot.cover.load_cover', new=AsyncMock(return_value='data:image/jpeg;base64,c3ludGhldGlj')):
+            await self.engine.round()
+        self.assertTrue(self.entries()[0]['cover_provided'])
+        self.assertNotIn('base64', json.dumps(self.entries()))
+        self.assertIsInstance(self.generate.call_args.args[0][1]['content'], list)
+        self.now += journal.REVISIT_SECONDS + 1
+        self.generate.reset_mock()
+        async def revoke(*args):
+            await self.engine.pause('manual', kind='manual')
+            return ''
+        with patch('local_bilibili_autopilot.cover.load_cover', new=revoke):
+            await self.engine.round()
+        self.generate.assert_not_awaited()
+        self.assertEqual(self.entries()[0]['status'], 'cancelled')
+
     def entries(self, **kwargs):
         return journal.page(self.store, self.client.uid, self.cfg.browse.timezone, **kwargs)['entries']
 
