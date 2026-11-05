@@ -12,6 +12,7 @@ from local_bilibili_autopilot.activity import query_activity, activity_reply_pro
 from local_bilibili_autopilot.models import Evidence
 from local_bilibili_autopilot.reading_bridge import authorized_chat
 import test_autopilot as fixtures
+from bilibili_api.exceptions import WbiRetryTimesExceedException
 from test_autopilot import ITEM, EVIDENCE, reflection
 
 
@@ -97,6 +98,34 @@ class JournalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.entries()[0]['status'], 'failed')
         self.generate.assert_awaited_once()
         self.assertEqual(self.store.stats('1001', 0)['attempts'], 0)
+
+    async def test_fenced_reflection_is_saved_once_without_repair_call(self):
+        await self.setup_journal()
+        self.generate.return_value = '\n```json\n' + reflection() + '\n```\n'
+        await self.engine.round()
+        self.assertEqual(self.entries()[0]['status'], 'noted')
+        self.generate.assert_awaited_once()
+        self.client.publish.assert_not_awaited()
+
+    async def test_wbi_read_failure_does_not_pause_or_replay(self):
+        await self.setup_journal()
+        self.client.understand.side_effect = WbiRetryTimesExceedException()
+        await self.engine.round()
+        self.assertFalse(self.engine.paused)
+        self.assertEqual(self.entries()[0]['status'], 'failed')
+        self.generate.assert_not_awaited()
+        self.client.publish.assert_not_awaited()
+        self.now += 30 * 86400
+        self.client.understand.reset_mock()
+        await self.engine.round()
+        self.client.understand.assert_not_awaited()
+
+    def test_fence_support_does_not_accept_extra_text_or_invalid_json(self):
+        for raw in ('正文\n```json\n' + reflection() + '\n```',
+                    '```json\n' + reflection() + '\n```\n正文',
+                    '```json\n{"thought":\n```'):
+            with self.subTest(raw=raw), self.assertRaises(ValueError):
+                journal.parse(raw, EVIDENCE, [])
 
     async def test_capacity_pauses_without_new_read_and_preserves_old_records(self):
         await self.setup_journal()

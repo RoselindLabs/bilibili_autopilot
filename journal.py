@@ -8,7 +8,7 @@ import unicodedata
 import uuid
 from zoneinfo import ZoneInfo
 
-from .models import normalized
+from .models import decision_object, normalized
 
 CAPACITY = 20000
 REVISIT_SECONDS = 7 * 86400
@@ -103,7 +103,7 @@ class Reflection:
 def parse(raw, evidence, history):
     if not isinstance(raw, str) or len(raw) > 16000:
         raise ValueError('感想输出过长或类型无效')
-    obj = json.loads(raw)
+    obj = decision_object(raw)
     fields = {'thought': 800, 'reason': 200, 'evidence_quote': 400, 'topic': 60, 'share_reason': 200}
     if not isinstance(obj, dict) or set(obj) != {*fields, 'related_ids'}:
         raise ValueError('感想字段不完整')

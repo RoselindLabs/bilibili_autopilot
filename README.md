@@ -2,7 +2,7 @@
 
 <p align="center"><img src="icon.png" width="128" height="128" alt="B站自主浏览与评论图标"></p>
 
-> **Version:** 0.10.1 · MaiBot 1.3.19 · Python ≥ 3.10 · SDK ≥ 2.12.0
+> **Version:** 0.10.2 · MaiBot 1.3.19 · Python ≥ 3.10 · SDK ≥ 2.12.0
 
 本仓是[Neko维护fork](NEKO_FORK.md)，保留原作者、MIT与上游历史。沿用原插件ID/账号/数据，
 只能替换现有插件，不能与上游双开。新增Neko主动聊天素材桥，评论仍独立控制，不因接入而开启发布。
