@@ -158,6 +158,8 @@ class ReadingStore:
                     result[entry['id']] = '已交给主动聊天安排'
                 elif 'released' in states:
                     result[entry['id']] = '本次未分享'
+                elif 'unavailable' in states:
+                    result[entry['id']] = '素材已不可用，未提供给主动聊天'
         return result
 
     def claim(self, uid, session, account, now, daily_max, interval_minutes, journal_only=False):
@@ -218,7 +220,7 @@ class ReadingStore:
                     raise ValueError("not_a_delivery_receipt")
                 if row["shown"]:
                     return {"success": True, "status": "shown"}
-                if row["status"] in {"released", "unknown"}:
+                if row["status"] in {"released", "unknown", "unavailable"}:
                     return {"success": True, "status": row["status"]}
                 if status == "submitted" and not task:
                     raise ValueError("missing_host_task")
@@ -226,9 +228,12 @@ class ReadingStore:
                 return {"success": True, "status": status}
             if operation != "prompt" or not task:
                 raise ValueError("invalid_operation")
-            if row["shown"] or row["status"] in {"released", "unknown"} or not 0 <= now - row["created"] < 180:
+            if row["shown"] or row["status"] in {"released", "unknown", "unavailable"} or not 0 <= now - row["created"] < 180:
                 return {"success": True, "candidate": None}
             material = db.execute("SELECT payload FROM readings WHERE uid=? AND bvid=?", (uid, row["bvid"])).fetchone()
+            if material is None:
+                db.execute("UPDATE offers SET status='unavailable',task=? WHERE id=?", (task, receipt))
+                return {"success": True, "candidate": None}
             db.execute("UPDATE offers SET shown=1,status='shown',task=? WHERE id=?", (task, receipt))
             return {
                 "success": True,

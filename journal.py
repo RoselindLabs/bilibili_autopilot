@@ -29,6 +29,23 @@ def initialize(db):
     """)
     # In-flight model work may have completed remotely. Never replay on restart.
     db.execute("UPDATE journal SET status='interrupted' WHERE status='reading'")
+    # Repair only the legacy projection, never recreate analyses or retry work.
+    for row in db.execute("SELECT j.* FROM journal j JOIN visits v ON v.uid=j.uid AND v.bvid=j.bvid "
+                          "AND v.mode='journal' WHERE (v.outcome IN ('reading','read_error') OR v.retry_at!=0) "
+                          "AND j.id=(SELECT id FROM journal WHERE uid=j.uid AND bvid=j.bvid "
+                          "ORDER BY started DESC,id DESC LIMIT 1)").fetchall():
+        project_visit(db, row['uid'], row['bvid'], row['status'], json.loads(row['payload']),
+                      json.loads(row['video']), row['finished'] or row['started'])
+
+
+def project_visit(db, uid, bvid, status, payload, video, now):
+    detail = {} if status == 'deleted' else {
+        'reason': payload.get('reason', ''), 'thought': payload.get('thought', ''),
+        'source': payload.get('source', ''), 'title': video.get('title', ''), 'video': video,
+    }
+    db.execute("UPDATE visits SET outcome=?,detail=?,updated_at=?,retry_at=0 "
+               "WHERE uid=? AND bvid=? AND mode='journal'",
+               (status, json.dumps(detail, ensure_ascii=False), now, uid, bvid))
 
 
 def capacity(store):
@@ -50,17 +67,30 @@ def begin(store, uid, item, now):
         return key
 
 
-def finish(store, key, uid, status, payload, now):
+def finish(store, key, uid, status, payload, now, item=None):
     if status not in {'noted', 'passed', 'unread', 'failed', 'cancelled', 'interrupted'}:
         raise ValueError('invalid_journal_status')
     raw = json.dumps(payload, ensure_ascii=False, allow_nan=False)
     if len(raw.encode('utf-8')) > 16000:
         raise ValueError('journal_entry_too_large')
     with store.connect() as db:
+        db.execute('BEGIN IMMEDIATE')
+        row = db.execute("SELECT * FROM journal WHERE id=? AND uid=? AND status='reading'", (key, uid)).fetchone()
+        if row is None:
+            return False
+        video = json.loads(row['video'])
+        if item is not None:
+            if item.bvid != row['bvid'] or item.aid != video.get('aid'):
+                raise ValueError('journal_video_identity_changed')
+            video = {k: v[:500] if isinstance(v, str) else v for k, v in asdict(item).items()}
         changed = db.execute(
-            "UPDATE journal SET status=?,payload=?,finished=? WHERE id=? AND uid=? AND status='reading'",
-            (status, raw, now, key, uid),
+            "UPDATE journal SET status=?,payload=?,finished=?,video=? WHERE id=? AND uid=? AND status='reading'",
+            (status, raw, now, json.dumps(video, ensure_ascii=False), key, uid),
         ).rowcount
+        latest = db.execute('SELECT id FROM journal WHERE uid=? AND bvid=? ORDER BY started DESC,id DESC LIMIT 1',
+                            (uid, row['bvid'])).fetchone()
+        if latest['id'] == key:
+            project_visit(db, uid, row['bvid'], status, payload, video, now)
         return changed == 1
 
 

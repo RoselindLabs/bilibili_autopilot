@@ -2,12 +2,15 @@
 import asyncio
 from dataclasses import asdict, replace
 import json
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest.mock import AsyncMock, patch
 
 from maibot_sdk.context import PluginContext
 from local_bilibili_autopilot import journal
+from local_bilibili_autopilot import cover
+import httpx
 from local_bilibili_autopilot.activity import query_activity, activity_reply_prompt
 from local_bilibili_autopilot.models import Evidence
 from local_bilibili_autopilot.reading_bridge import authorized_chat
@@ -19,6 +22,148 @@ from test_autopilot import ITEM, EVIDENCE, reflection
 
 class JournalTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = fixtures.EngineTests.asyncSetUp
+
+    async def test_slow_cover_cancellation_retains_actual_round_ownership(self):
+        await self.setup_journal()
+        for index, cancel in enumerate((True, False)):
+            item = replace(ITEM, bvid=f'BV{index:010d}', cover_url='https://i0.hdslb.com/bfs/archive/test.png')
+            self.client.recommended.return_value = [item]
+            self.client.understand.return_value = item, EVIDENCE
+            entered = asyncio.Event()
+            release = threading.Event()
+            loop = asyncio.get_running_loop()
+            workers = []
+            def slow(raw):
+                workers.append(threading.get_ident())
+                loop.call_soon_threadsafe(entered.set)
+                if not release.wait(5):
+                    raise RuntimeError('test decoder was not released')
+                return 'data:image/jpeg;base64,c3ludGhldGlj'
+            client = httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, content=b'synthetic')))
+            with patch.object(cover.httpx, 'AsyncClient', return_value=client), patch.object(cover, 'encode_image', side_effect=slow), patch.object(cover, 'COVER_TIMEOUT', .05 if not cancel else 6):
+                task = asyncio.create_task(self.engine.round())
+                try:
+                    await asyncio.wait_for(entered.wait(), 2)
+                    if cancel:
+                        task.cancel()
+                    await asyncio.sleep(.1)
+                    if cancel:
+                        task.cancel()  # repeated cancellation must not abandon the decoder
+                        await asyncio.sleep(0)
+                    self.assertFalse(task.done())
+                    self.assertTrue(self.engine.lock.locked())
+                    calls = self.generate.await_count
+                    await self.engine.round()
+                    self.assertEqual(len(workers), 1)
+                    self.assertNotEqual(workers[0], threading.get_ident())
+                    self.assertEqual(self.generate.await_count, calls)
+                finally:
+                    release.set()
+                    if cancel:
+                        with self.assertRaises(asyncio.CancelledError):
+                            await task
+                    else:
+                        await task
+                self.assertFalse(self.engine.lock.locked())
+                if not cancel:
+                    self.assertIsInstance(self.generate.call_args.args[0][1]['content'], str)
+                    self.assertEqual(self.generate.await_count, calls + 1)
+
+    async def test_verified_details_and_atomic_terminal_projection(self):
+        await self.setup_journal()
+        detailed = replace(ITEM, title='校正后的标题', topic='123', up_name='核验后的UP')
+        self.client.understand.return_value = detailed, EVIDENCE
+        await self.engine.round()
+        row = self.entries()[0]
+        self.assertEqual(row['video']['title'], detailed.title)
+        self.assertEqual(row['video']['topic'], '123')
+        matches = journal.context(self.store, self.client.uid, replace(detailed, bvid='different', up_uid='different'))
+        self.assertEqual(matches[0]['retrieval_match'], 'same_topic')
+        self.assertEqual(len(query_activity(self.store, self.client.uid, now=self.now, timezone='Asia/Shanghai',
+                                           query=detailed.title)['records']), 1)
+        with self.store.connect() as db:
+            visit = dict(db.execute("SELECT * FROM visits WHERE mode='journal'").fetchone())
+        self.assertEqual(visit['outcome'], 'noted')
+        self.assertEqual(json.loads(visit['detail'])['video']['topic'], '123')
+        self.assertEqual(self.store.stats(self.client.uid, 0)['views'], 1)
+
+    async def test_all_terminal_states_restart_without_retry_or_quota_mutation(self):
+        for index, status in enumerate(('noted', 'passed', 'unread', 'failed', 'cancelled', 'interrupted')):
+            item = replace(ITEM, bvid=f'BV{index:010d}')
+            key = journal.begin(self.store, '1001', item, self.now)
+            self.store.visit('1001', item.bvid, 'journal', self.now, 'reading', '{}', False)
+            payload = {'reason': '合成终态'}
+            self.assertTrue(journal.finish(self.store, key, '1001', status, payload, self.now + 1, item))
+            self.assertFalse(journal.finish(self.store, key, '1001', 'failed', {}, self.now + 2))
+        before = self.store.stats('1001', 0)
+        await self.engine.initialize()
+        await self.engine.initialize()
+        self.assertEqual(self.store.stats('1001', 0), before)
+        with self.store.connect() as db:
+            rows = db.execute("SELECT v.outcome,v.retry_at,v.failures,j.status FROM visits v "
+                              "JOIN journal j ON j.uid=v.uid AND j.bvid=v.bvid WHERE v.mode='journal'").fetchall()
+        self.assertEqual(len(rows), 6)
+        for row in rows:
+            self.assertEqual(row['outcome'], row['status'])
+            self.assertEqual((row['retry_at'], row['failures']), (0, 0))
+
+    async def test_unread_failed_and_cancelled_rounds_close_legacy_projection(self):
+        await self.setup_journal()
+        for index, mode in enumerate(('unread', 'failed', 'cancelled')):
+            item = replace(ITEM, bvid=f'BV{index:010d}')
+            self.client.recommended.return_value = [item]
+            self.client.understand.side_effect = None
+            self.client.understand.return_value = item, Evidence('字幕', '') if mode == 'unread' else EVIDENCE
+            self.generate.side_effect = ValueError('synthetic') if mode == 'failed' else None
+            if mode == 'cancelled':
+                async def stop(*args):
+                    await self.engine.pause('合成暂停', kind='manual')
+                    return item, EVIDENCE
+                self.client.understand.side_effect = stop
+            await self.engine.round()
+            with self.store.connect() as db:
+                row = db.execute("SELECT outcome,retry_at FROM visits WHERE bvid=? AND mode='journal'", (item.bvid,)).fetchone()
+            self.assertEqual((row['outcome'], row['retry_at']), (mode, 0))
+
+    async def test_finish_identity_and_transaction_rollback(self):
+        key = journal.begin(self.store, '1001', ITEM, self.now)
+        self.store.visit('1001', ITEM.bvid, 'journal', self.now, 'reading', '{}', False)
+        self.assertFalse(journal.finish(self.store, key, 'other', 'noted', {}, self.now, ITEM))
+        for wrong in (replace(ITEM, bvid='other'), replace(ITEM, aid=999)):
+            with self.assertRaisesRegex(ValueError, 'identity_changed'):
+                journal.finish(self.store, key, '1001', 'noted', {}, self.now, wrong)
+        with patch.object(journal, 'project_visit', side_effect=RuntimeError('synthetic write failure')):
+            with self.assertRaises(RuntimeError):
+                journal.finish(self.store, key, '1001', 'noted', {}, self.now, ITEM)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT status FROM journal WHERE id=?', (key,)).fetchone()[0], 'reading')
+        await self.engine.initialize()
+        await self.engine.initialize()
+        with self.store.connect() as db:
+            self.assertEqual(db.execute("SELECT outcome,retry_at,failures FROM visits").fetchone()[:], ('interrupted', 0, 0))
+        self.assertEqual(self.store.stats('1001', 0)['views'], 1)
+
+    async def test_missing_material_is_terminal_and_keeps_opportunity_and_unknown(self):
+        store = ReadingStore(self.temp.name)
+        decision = SimpleNamespace(reason='合成资料')
+        store.remember('1001', ITEM, EVIDENCE, decision, self.now)
+        claim = store.claim('1001', 'chat', '123', self.now, 1, 180)
+        body = {**claim, 'host_task': 'proactive:neko.proactive:1234567890123'}
+        with store.connect() as db:
+            db.execute('DELETE FROM readings')
+        self.assertIsNone(store.operate('prompt', '1001', 'chat', '123', body, self.now + 1)['candidate'])
+        self.assertEqual(store.operate('status', '1001', 'chat', '123', body, self.now + 1)['status'], 'unavailable')
+        for late in ('released', 'submitted', 'unknown'):
+            self.assertEqual(store.operate('receipt', '1001', 'chat', '123', {**body, 'status': late}, self.now+2)['status'], 'unavailable')
+        store.remember('1001', ITEM, EVIDENCE, decision, self.now + 2)
+        self.assertIsNone(store.claim('1001', 'chat', '123', self.now+3, 10, 0))
+        store.remember('1001', replace(ITEM, bvid='BV0000000001'), EVIDENCE, decision, self.now+2)
+        self.assertIsNone(store.claim('1001', 'chat', '123', self.now+3, 1, 0))
+        other = store.claim('1001', 'other', '123', self.now+3, 1, 0)
+        unknown = {**other, 'status': 'unknown'}
+        store.operate('receipt', '1001', 'other', '123', unknown, self.now+4)
+        self.assertIsNone(store.operate('prompt', '1001', 'other', '123', {**other, 'host_task': body['host_task']}, self.now+5)['candidate'])
+        self.assertEqual(store.operate('status', '1001', 'other', '123', other, self.now+5)['status'], 'unknown')
 
     async def test_context_prioritizes_old_revisit_and_topic_over_recent_author(self):
         def add(item, when, uid='1001', status='noted'):

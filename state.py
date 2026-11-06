@@ -224,7 +224,8 @@ class StateStore:
         ):
             rows = db.execute(
                 f"SELECT d.* FROM {table} d WHERE d.outcome='reading' "
-                f"AND NOT EXISTS(SELECT 1 FROM {attempts} a WHERE a.uid=d.uid AND a.{key}=d.{key})"
+                + ("AND d.mode!='journal' " if table == 'visits' else "")
+                + f"AND NOT EXISTS(SELECT 1 FROM {attempts} a WHERE a.uid=d.uid AND a.{key}=d.{key})"
             ).fetchall()
             for row in rows:
                 failures = row["failures"] + 1

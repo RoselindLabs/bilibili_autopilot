@@ -1199,7 +1199,7 @@ class Autopilot:
             await durable_io(self.store.visit, uid, item.bvid, 'journal', self.clock(), 'reading', '{}', False)
             item, evidence = await self.client.understand(item, reflection_cfg.model.content_max_chars)
             if (self.get_config() != cfg or self.paused or not self.active(cfg) or self.client.uid != uid):
-                await durable_io(journal.finish, self.store, key, uid, 'cancelled', {'reason': '读取期间状态改变'}, self.clock())
+                await durable_io(journal.finish, self.store, key, uid, 'cancelled', {'reason': '读取期间状态改变'}, self.clock(), item)
                 closed = True
                 return '本次阅读已停止'
             blocked = self.filter_item(item, cfg) or any(
@@ -1207,13 +1207,13 @@ class Autopilot:
             )
             if blocked or len(evidence.text.strip()) < 30:
                 reason = '内容已跳过' if blocked else '没有读到足够的正文'
-                await durable_io(journal.finish, self.store, key, uid, 'unread', {'reason': reason}, self.clock())
+                await durable_io(journal.finish, self.store, key, uid, 'unread', {'reason': reason}, self.clock(), item)
                 closed = True
                 return reason
             from .cover import load_cover
             cover = await load_cover(item.cover_url)
             if self.get_config() != cfg or self.paused or not self.active(cfg) or self.client.uid != uid:
-                await durable_io(journal.finish, self.store, key, uid, 'cancelled', {'reason': '读取封面期间状态改变'}, self.clock())
+                await durable_io(journal.finish, self.store, key, uid, 'cancelled', {'reason': '读取封面期间状态改变'}, self.clock(), item)
                 closed = True
                 return '本次阅读已停止'
             memories = await durable_io(journal.context, self.store, uid, item)
@@ -1222,7 +1222,7 @@ class Autopilot:
             ), timeout=reflection_cfg.model.decision_budget_seconds)
             reflection = journal.parse(raw, evidence, memories)
             if self.get_config() != cfg or self.paused or not self.active(cfg) or self.client.uid != uid:
-                await durable_io(journal.finish, self.store, key, uid, 'cancelled', {'reason': '记录前状态改变'}, self.clock())
+                await durable_io(journal.finish, self.store, key, uid, 'cancelled', {'reason': '记录前状态改变'}, self.clock(), item)
                 closed = True
                 return '本次感想未保存'
             payload = {**asdict(reflection), 'source': evidence.source[:100], 'coverage': evidence.coverage[:300],
@@ -1230,11 +1230,8 @@ class Autopilot:
                        'related': [h for h in memories if h['id'] in reflection.related_ids]}
             if cover:
                 payload['coverage'] += '；另提供静态封面，未播放视频'
-            await durable_io(journal.finish, self.store, key, uid, 'noted' if reflection.thought else 'passed', payload, self.clock())
+            await durable_io(journal.finish, self.store, key, uid, 'noted' if reflection.thought else 'passed', payload, self.clock(), item)
             closed = True
-            await self.record(uid, item, 'journal', 'noted' if reflection.thought else 'passed',
-                              json.dumps({'reason': reflection.reason, 'thought': reflection.thought,
-                                          'source': evidence.source}, ensure_ascii=False), retryable=False)
             if reflection.share_reason and self.reading_sink is not None:
                 try:
                     await self.reading_sink(uid, item, evidence, reflection, journal_id=key)

@@ -8,8 +8,11 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from PIL import Image
 
+from .reading_bridge import io as durable_io
+
 MAX_BYTES = 2 * 1024 * 1024
 MAX_PIXELS = 8_000_000
+COVER_TIMEOUT = 6
 
 
 def cover_url(value):
@@ -40,6 +43,26 @@ def encode_image(raw):
 
 
 async def load_cover(value):
+    # Shield cancellation cleanup itself: repeated unload/cancel requests must
+    # not release the engine lock while wait_for is still draining its child.
+    job = asyncio.create_task(_load_cover(value))
+    try:
+        return await asyncio.shield(job)
+    except asyncio.CancelledError:
+        job.cancel()
+        while not job.done():
+            try:
+                await asyncio.shield(job)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                break
+        if not job.cancelled():
+            job.exception()
+        raise
+
+
+async def _load_cover(value):
     url = cover_url(value)
     if not url:
         return ''
@@ -56,8 +79,11 @@ async def load_cover(value):
                     raw.extend(chunk)
                     if len(raw) > MAX_BYTES:
                         raise ValueError('cover_too_large')
-        return encode_image(raw)
+        # The engine's single round lock owns this worker until it really exits.
+        # Cancellation/timeout drains the thread before returning, so reload or
+        # another round cannot accumulate abandoned decoders. No model is added.
+        return await durable_io(encode_image, raw)
     try:
-        return await asyncio.wait_for(download(), timeout=6)
+        return await asyncio.wait_for(download(), timeout=COVER_TIMEOUT)
     except (httpx.HTTPError, OSError, ValueError, asyncio.TimeoutError, Image.DecompressionBombError):
         return ''
