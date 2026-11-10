@@ -37,7 +37,7 @@ web
 
 ## Evidence on Hand
 
-现行行为合同见 NEKO_FORK.md；运行版本与分享授权见 E:/vps-panel/docs/maibot-plugins.md 的 B站章节。上游 v0.8.7 提供历史查询基础；维护版0.10.0实现独立手记，配套主动插件2.9.4。设计合成资料与真实自然浏览记录分开保存。
+现行行为合同见 NEKO_FORK.md；运行版本与分享授权见相邻运维仓库 `../../vps-panel/docs/maibot-plugins.md` 的 B站章节。上游 v0.8.7 提供历史查询基础；维护版0.10.0实现独立手记，配套主动插件2.9.4。设计合成资料与真实自然浏览记录分开保存。
 
 ## Product Principles
 
