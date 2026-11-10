@@ -241,6 +241,7 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
 
     @Tool(
         "bilibili_autopilot_history",
+        platforms="qq",
         brief_description="回忆自己刷B站的感想与经历；在已授权聊天查询真实手记或旧评论",
         detailed_description=(
             "当用户问你最近在 B 站/bilibili 刷了什么、看了什么、评论了什么、回复了谁，"
