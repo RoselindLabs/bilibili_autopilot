@@ -265,7 +265,7 @@ class ActivityToolTests(unittest.IsolatedAsyncioTestCase):
         # Upstream 3d2fdf3: SDK 2.22 merges legacy detailed_description into description.
         description = metadata["detailed_description"] if "detailed_description" in metadata else metadata["description"]
         self.assertIn("先用本工具查真实记录", description)
-        parameters = metadata['parameters']
+        parameters = metadata.get('parameters_raw') or metadata['parameters']
         if isinstance(parameters, list):
             parameters = {p['name']: p for p in parameters}
         elif 'properties' in parameters:

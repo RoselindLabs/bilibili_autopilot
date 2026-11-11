@@ -271,6 +271,7 @@ class WebUITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.plugin.engine.store.control()["pause_kind"], "manual")
 
     async def test_unresolved_post_displays_send_hold_without_pausing_browsing(self):
+        self.plugin.config.browse.active_end_hour = self.plugin.config.browse.active_start_hour
         await self.plugin.engine.start()
         store = self.plugin.engine.store
         store.reserve("1", ITEM.bvid, "未知发送的评论", 100, 0, 3, 0, .88)
