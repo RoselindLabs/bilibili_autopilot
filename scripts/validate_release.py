@@ -12,7 +12,7 @@ import zipfile
 
 PLUGIN_ID = "local.bilibili-autopilot"
 FILES = (
-    "__init__.py", "_manifest.json", "plugin.py", "client.py", "config.py", "engine.py",
+    "__init__.py", "_manifest.json", "plugin.py", "client.py", "transport.py", "config.py", "engine.py",
     "models.py", "sharing.py", "reading_bridge.py", "state.py", "activity.py", "journal.py", "cover.py", "journal.html", "webui.py", "webui.json", "icon.png",
     "README.md", "CHANGELOG.md", "LICENSE", "requirements.txt", "pyproject.toml",
     "config.example.toml", "docs/PUBLISHING.md", "docs/MARKETPLACE_SUBMISSION.md", "docs/ICON.md",
@@ -22,6 +22,7 @@ FILES = (
     "tests/test_sharing.py", "tests/test_webui.py", "tests/test_handoff.py", "tests/test_candidates.py",
     "tests/test_ecosystem.py", "NEKO_FORK.md",
     "tests/test_activity.py", "tests/test_login_diagnostics.py", "tests/test_journal.py", "tests/test_cover.py", "tests/store_fixture.py",
+    "tests/test_transport.py", "tests/test_platform_scope.py", "tests/test_reading_diagnostics.py",
 )
 
 

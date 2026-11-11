@@ -1,4 +1,4 @@
-"""Standalone CI policy, vendored unchanged as .github/ci_policy.py in plugins.
+"""Standalone CI policy; this fork pins its actual production SDK below.
 
 Only test routing: unknown diffs run tests; documentation success cannot publish.
 No production configuration, third-party actions, deployment or model requests.
@@ -15,7 +15,7 @@ import urllib.parse
 import urllib.request
 
 PRODUCTION_PYTHON = "3.14.4"
-PRODUCTION_SDK = "==2.19.0"
+PRODUCTION_SDK = "==2.22.1"
 
 
 def is_documentation(name):

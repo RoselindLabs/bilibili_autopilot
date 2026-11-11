@@ -277,7 +277,8 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
         trusted_context="neko.tools.context.v1",
         brief_description=(
             "查询自己B站浏览历史、手记感想、评论和跟进回复；按关键词找主题或原文依据，"
-            "更多按next_call续查更早记录。仅已授权QQ聊天，只读、不刷视频或发送。"
+            "更多按next_call.arguments续页；若当前Schema要求session_id，保留上次调用相同真实session_id，其余参数原样。"
+            "仅已授权QQ聊天，只读、不刷视频或发送。"
         ),
         detailed_description=(
             "当用户问你最近在 B 站/bilibili 刷了什么、看了什么、评论了什么、回复了谁，"
@@ -288,7 +289,7 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
             "query 用简短标题、UP 主、主题、感想、原文引用或评论关键词或 BV 号，不要填整句问题。"
             "感想用 journal，最近浏览用 browse，旧评论用 comments，跟进用 replies，综合用 all。"
             "默认查最近7天；需要更早记录可增大 days，0 表示全部历史。"
-            "同条件还有结果时，原样使用next_call的参数续页；共享Focus沿用本次会话路由。"
+            "同条件还有结果时，按next_call.arguments续页；若当前Schema要求session_id，保留上次调用相同真实session_id，其余参数原样。"
             "cursor十分钟有效，过期、重载或改条件后去掉cursor重新查。"
             "区分已发送、预览草稿、失败与未知结果，只按返回事实自然回答。"
         ),
@@ -301,7 +302,7 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
             "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8,
                       "description": "每页最多条数，默认8、最多20，还受12000字符记录预算限制"},
             "cursor": {"type": "string", "default": "",
-                       "description": "首次留空；有next_call时原样带其cursor及原query/kind/days/limit续查更早记录。仅本会话、十分钟有效；失效或改条件需去掉cursor重查"},
+                       "description": "首次留空；按next_call.arguments续页；若当前Schema要求session_id，保留上次调用相同真实session_id，其余参数原样。仅本会话、十分钟有效；失效或改条件需去掉cursor重查"},
         },
     )
     async def tool_history(

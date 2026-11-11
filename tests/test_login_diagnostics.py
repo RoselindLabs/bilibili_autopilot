@@ -44,7 +44,7 @@ class DiagnosticDetailsTests(unittest.TestCase):
 
     @unittest.skipUnless(CurlSSLError, "curl_cffi 未安装")
     def test_real_curl_exception_keeps_ca_bundle_code_without_certificate_path(self):
-        error = CurlSSLError("error setting certificate verify locations " + PRIVATE, code=77)
+        error = CurlSSLError(PRIVATE, code=77)
         details = login_error_details(error)
         self.assertIn("curl_cffi.requests.exceptions.SSLError", details)
         self.assertIn("code=77", details)
@@ -89,8 +89,7 @@ class LoginDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
 
         self.client.http = httpx.AsyncClient(transport=httpx.MockTransport(transport))
         self.info = AsyncMock(return_value={"mid": 1, "name": "模拟账号"})
-        for target, replacement in (("user.get_self_info", self.info),
-                                    ("get_selected_client", Mock(return_value=("curl_cffi", object)))):
+        for target, replacement in (("user.get_self_info", self.info),):
             patcher = patch("local_bilibili_autopilot.client." + target, replacement)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -122,12 +121,12 @@ class LoginDiagnosticsTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.client.credential_path.exists())
         self.assert_private_absent(str(raised.exception) + self.logs())
 
-    async def test_account_ssl_failure_identifies_selected_client_and_does_not_persist(self):
+    async def test_account_ssl_failure_identifies_httpx_and_does_not_persist(self):
         self.info.side_effect = ssl.SSLError(1, "WRONG_VERSION_NUMBER " + PRIVATE)
         with self.assertRaises(LoginDiagnosticError) as raised:
             await self.client.poll_login("private-qr")
         self.assertIn("阶段=验证扫码账号", str(raised.exception))
-        self.assertIn("客户端=curl_cffi", str(raised.exception))
+        self.assertIn("客户端=httpx", str(raised.exception))
         self.assertIn("wrong_tls_version", str(raised.exception))
         self.assertFalse(self.client.credential_path.exists())
         self.assertIsNone(self.client.credential)

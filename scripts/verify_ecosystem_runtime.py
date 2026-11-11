@@ -4,9 +4,11 @@ import argparse
 import asyncio
 from contextlib import ExitStack
 import json
+from importlib.metadata import version as package_version
 import os
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import time
@@ -20,7 +22,7 @@ async def verify(args):
         instance = Path(cleanup.enter_context(tempfile.TemporaryDirectory(prefix="bili-ecosystem-"))).resolve()
         cleanup.callback(os.chdir, Path.cwd())
         os.chdir(instance)
-        os.environ.update(MAIBOT_INSTANCE_DIR=str(instance), MAIBOT_HOST_VERSION="1.3.19", MAIBOT_LOCALE="zh-CN")
+        os.environ.update(MAIBOT_INSTANCE_DIR=str(instance), MAIBOT_HOST_VERSION=args.host_version, MAIBOT_LOCALE="zh-CN")
         if args.extra_site:
             sys.path.insert(0, str(args.extra_site.resolve()))
         sys.path.insert(0, str(args.host_source.resolve()))
@@ -46,6 +48,7 @@ async def verify(args):
                     "engine.py",
                     "models.py",
                     "client.py",
+                    "transport.py",
                     "state.py",
                     "sharing.py",
                     "reading_bridge.py",
@@ -74,7 +77,7 @@ async def verify(args):
             for f in files:
                 shutil.copyfile(root / f, target / f)
         (plugins / "bilibili/config.toml").write_text(
-            '[plugin]\nconfig_version="0.2.0"\nenabled=true\n[browse]\nauto_start=false\n[ecosystem]\nenabled=true\nqq_friend_ids=["654321"]\n[share]\nqq_group_ids=["123456"]\n',
+            '[plugin]\nconfig_version="0.2.0"\nenabled=true\n[browse]\nauto_start=false\n[replies]\nenabled=false\n[ecosystem]\nenabled=true\nqq_friend_ids=["654321"]\n[share]\nqq_group_ids=["123456"]\n',
             encoding="utf-8",
         )
         (plugins / "proactive/config.toml").write_text(
@@ -201,13 +204,80 @@ async def verify(args):
             assert '真实合成感想' in str(answer) and 'possible_conversation' in str(answer)
             assert len(triggers) == 2
             assert not bili.config.comment.publish_enabled
+            assert not bili.config.replies.enabled
+            # Real SDK registration -> Host description/identity normalization -> Runner tool.
+            from src.plugin_runtime.host.component_registry import ToolEntry
+            from src.plugin_runtime.component_query import ComponentQueryService
+            from src.core.tooling import ToolInvocation, ToolExecutionContext, ToolExecutionResult
+            from src.maisaka.focus.tools import FocusToolRouter, FocusToolRoute, routed_schema
+            from jsonschema import validate
+            component = next(c for c in bili.get_components() if c['type'] == 'TOOL')
+            entry = ToolEntry(component['name'], component['type'], 'local.bilibili-autopilot', component['metadata'])
+            assert entry.platforms == {'qq'}
+            assert entry.metadata['trusted_context'] == 'neko.tools.context.v1'
+            definition = ComponentQueryService._build_tool_definition(entry)
+            for phrase in ('先用本工具查真实记录', 'QQ', 'next_call', '主题'):
+                assert phrase in definition['description'], phrase
+            context = ToolExecutionContext(session_id='chat', stream_id='chat', platform='qq',
+                                           group_id='123456', is_group_chat=True)
+            invocation = ToolInvocation(tool_name=entry.name, arguments={'query': '', 'limit': 1,
+                '_host_context': {'session_id': 'forged', 'account_id': 'forged'}})
+            tool_args = ComponentQueryService._build_tool_invocation_payload(invocation, context, entry=entry)
+            assert tool_args['_host_context']['session_id'] == 'chat'
+            assert tool_args['_host_context']['account_id'] == ''
+            bili.engine.store.visit('1001', item.bvid, 'preview', time.time(), 'would_comment',
+                                    json.dumps({'title': '离线Host历史记录'}, ensure_ascii=False))
+            bili.engine.store.visit('1001', 'BV0987654321', 'preview', time.time()-1, 'skipped',
+                                    json.dumps({'title': '更早的离线记录'}, ensure_ascii=False))
+            response = await runner._handle_invoke(Envelope(request_id=6, message_type='request',
+                method='plugin.invoke_tool', plugin_id='local.bilibili-autopilot',
+                payload={'component_name': 'tool_history', 'args': tool_args}))
+            assert response.error is None, response.error
+            assert response.payload['result']['success'], response.payload
+            history = json.loads(response.payload['result']['content'])
+            assert history['records'][0]['bvid'] == item.bvid, history
+            assert '离线Host历史记录' in response.payload['result']['content']
+            assert history['next_call'] and '保留上次调用相同真实session_id' in history['note']
+            spec = ComponentQueryService._build_tool_spec(entry)
+            next_args = history['next_call']['arguments']
+            validate(next_args, spec.parameters_schema)  # ordinary tools need no session_id argument
+            assert 'session_id' in routed_schema(spec, 'chat')['required']
+            async def invoke_native(invocation, context):
+                payload = ComponentQueryService._build_tool_invocation_payload(invocation, context, entry=entry)
+                reply = await runner._handle_invoke(Envelope(request_id=7, message_type='request',
+                    method='plugin.invoke_tool', plugin_id='local.bilibili-autopilot',
+                    payload={'component_name': 'tool_history', 'args': payload}))
+                assert reply.error is None, reply.error
+                value = reply.payload['result']
+                return ToolExecutionResult(tool_name=entry.name, success=value['success'], content=value['content'])
+            registry = SimpleNamespace(get_tool_spec=AsyncMock(return_value=spec), invoke=AsyncMock(side_effect=invoke_native))
+            runtime = SimpleNamespace(session_id='chat', _tool_registry=registry,
+                expand_message_id_aliases=lambda args: args,
+                chat_stream=SimpleNamespace(is_group_session=True, group_id='123456', user_id='', platform='qq'))
+            group = SimpleNamespace(members={'chat': runtime}, is_member_valid=lambda member: member is runtime,
+                                    scope_id='synthetic-focus')
+            router = FocusToolRouter(group)
+            router.routes[entry.name] = FocusToolRoute(spec, {'chat': spec})
+            missing = await router.invoke(entry.name, next_args, 'missing-session', '')
+            assert not missing[1].success
+            registry.invoke.assert_not_awaited()
+            continued = await router.invoke(entry.name, {**next_args, 'session_id': 'chat'}, 'continuation', '')
+            assert continued[1].success, continued[1]
+            assert json.loads(continued[1].content)['records'][0]['bvid'] == 'BV0987654321'
+            assert '_host_context' not in next_args and 'session_id' not in next_args
             result = {
+                "host_sha": subprocess.check_output(['git', '-C', str(args.host_source), 'rev-parse', 'HEAD'], text=True).strip(),
+                "host_version": args.host_version,
+                "sdk_version": package_version('maibot-plugin-sdk'),
+                "real_host_description_trusted_envelope_runner_tool": True,
+                "real_focus_schema_and_router_continuation": True,
                 "real_host_runner_two_plugins": True,
                 "real_sdk_signed_api_roundtrip": True,
                 "explicit_private_and_group_handoffs": True,
                 "body_absent_from_task_history": True,
                 "request_only_material_once": True,
                 "comments_remain_disabled": True,
+                "replies_remain_disabled": True,
                 "life_not_used": True,
                 "model_calls": 0,
                 "bilibili_calls": 0,
@@ -224,6 +294,7 @@ async def verify(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--host-source", type=Path, required=True)
+    p.add_argument("--host-version", default="1.4.3")
     p.add_argument("--proactive-source", type=Path, required=True)
     p.add_argument("--extra-site", type=Path)
     p.add_argument("--report", type=Path, required=True)

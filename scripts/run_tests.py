@@ -53,7 +53,7 @@ def main() -> int:
     suite = unittest.defaultTestLoader.discover(str(root / "tests"))
     cases = list(tests(suite))
     discovered = {test.id() for test in cases}
-    for group in ['test_autopilot', 'test_client_plugin', 'test_recovery', 'test_replies', 'test_sharing', 'test_webui', 'test_handoff', 'test_candidates', 'test_ecosystem', 'test_activity', 'test_login_diagnostics', 'test_journal', 'test_cover']:
+    for group in ['test_autopilot', 'test_client_plugin', 'test_recovery', 'test_replies', 'test_sharing', 'test_webui', 'test_handoff', 'test_candidates', 'test_ecosystem', 'test_activity', 'test_login_diagnostics', 'test_journal', 'test_cover', 'test_transport', 'test_platform_scope', 'test_reading_diagnostics']:
         if not any(test.startswith(group + '.') for test in discovered):
             raise RuntimeError('Missing required test group: ' + group)
     if args.workers == 2 and not args.modules:

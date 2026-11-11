@@ -261,11 +261,18 @@ class ActivityToolTests(unittest.IsolatedAsyncioTestCase):
         components = self.plugin.get_components()
         tool = next(c for c in components if c["name"] == "bilibili_autopilot_history")
         self.assertEqual(tool["type"], "TOOL")
-        self.assertIn("先用本工具查真实记录", tool["metadata"]["detailed_description"])
-        for field in ('description', 'brief_description'):
-            self.assertIn('主题', tool['metadata'][field])
-            self.assertIn('next_call', tool['metadata'][field])
-            self.assertIn('QQ', tool['metadata'][field])
+        metadata = tool["metadata"]
+        # Upstream 3d2fdf3: SDK 2.22 merges legacy detailed_description into description.
+        description = metadata["detailed_description"] if "detailed_description" in metadata else metadata["description"]
+        self.assertIn("先用本工具查真实记录", description)
+        visible_descriptions = [metadata['description']]
+        if 'detailed_description' in metadata:
+            visible_descriptions.append(metadata['brief_description'])
+        for visible in visible_descriptions:
+            self.assertIn('主题', visible)
+            self.assertIn('next_call', visible)
+            self.assertIn('保留上次调用相同真实session_id', visible)
+            self.assertIn('QQ', visible)
         self.assertEqual(tool['metadata']['trusted_context'], 'neko.tools.context.v1')
         result = await self.history(query="海洋", stream_id="s", uid="other-account")
         self.assertTrue(result["success"])
@@ -418,6 +425,7 @@ class ActivityToolTests(unittest.IsolatedAsyncioTestCase):
         for index in range(3):
             self.store.visit('1', f'BV{index:010d}', 'preview', NOW-10, 'skipped', '{"topic":"同主题"}')
         first = await self.history(stream_id='s', query='同主题', limit=1)
+        self.assertIn('保留上次调用相同真实session_id', json.loads(first['content'])['note'])
         args = json.loads(first['content'])['next_call']['arguments']
         second = await self.history(**args, stream_id='s', session_id='untrusted', uid='2',
                                                 account_id='fake', platform='telegram')
