@@ -265,14 +265,15 @@ class ActivityToolTests(unittest.IsolatedAsyncioTestCase):
         # Upstream 3d2fdf3: SDK 2.22 merges legacy detailed_description into description.
         description = metadata["detailed_description"] if "detailed_description" in metadata else metadata["description"]
         self.assertIn("先用本工具查真实记录", description)
-        visible_descriptions = [metadata['description']]
-        if 'detailed_description' in metadata:
-            visible_descriptions.append(metadata['brief_description'])
-        for visible in visible_descriptions:
-            self.assertIn('主题', visible)
-            self.assertIn('next_call', visible)
-            self.assertIn('保留上次调用相同真实session_id', visible)
-            self.assertIn('QQ', visible)
+        parameters = metadata['parameters']
+        if isinstance(parameters, list):
+            parameters = {p['name']: p for p in parameters}
+        elif 'properties' in parameters:
+            parameters = parameters['properties']
+        self.assertIn('主题', parameters['query']['description'])
+        self.assertIn('next_call', parameters['cursor']['description'])
+        self.assertIn('保留上次调用相同真实session_id', parameters['cursor']['description'])
+        self.assertIn('QQ', description)
         self.assertEqual(tool['metadata']['trusted_context'], 'neko.tools.context.v1')
         result = await self.history(query="海洋", stream_id="s", uid="other-account")
         self.assertTrue(result["success"])

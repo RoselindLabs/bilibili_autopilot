@@ -216,8 +216,10 @@ async def verify(args):
             assert entry.platforms == {'qq'}
             assert entry.metadata['trusted_context'] == 'neko.tools.context.v1'
             definition = ComponentQueryService._build_tool_definition(entry)
-            for phrase in ('先用本工具查真实记录', 'QQ', 'next_call', '主题'):
+            for phrase in ('先用本工具查真实记录', 'QQ'):
                 assert phrase in definition['description'], phrase
+            assert '主题' in definition['parameters']['properties']['query']['description']
+            assert 'next_call' in definition['parameters']['properties']['cursor']['description']
             context = ToolExecutionContext(session_id='chat', stream_id='chat', platform='qq',
                                            group_id='123456', is_group_chat=True)
             invocation = ToolInvocation(tool_name=entry.name, arguments={'query': '', 'limit': 1,

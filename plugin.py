@@ -276,33 +276,24 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
         platforms="qq",
         trusted_context="neko.tools.context.v1",
         brief_description=(
-            "查询自己B站浏览历史、手记感想、评论和跟进回复；按关键词找主题或原文依据，"
-            "更多按next_call.arguments续页；若当前Schema要求session_id，保留上次调用相同真实session_id，其余参数原样。"
-            "仅已授权QQ聊天，只读、不刷视频或发送。"
+            "查询自己B站的已保存浏览历史、手记感想、评论和跟进回复，含后台自主浏览；只读，不刷视频或发送。"
         ),
         detailed_description=(
-            "当用户问你最近在 B 站/bilibili 刷了什么、看了什么、评论了什么、回复了谁，"
-            "或回忆自己刷 B 站的经历时，先用本工具查真实记录再回答。"
-            "包括后台自主浏览；不要因为当前聊天没有记录就回答不知道。"
-            "这是只读查询，不会刷视频或发评论。"
+            "用户问最近看了什么、评论了什么、回复了谁，或要回忆自己的B站经历时，"
+            "先用本工具查真实记录再回答，不要因当前聊天无记录就回答不知道。"
             "仅share.qq_group_ids授权群、ecosystem.qq_friend_ids授权私聊及指定QQ账号可查。"
-            "query 用简短标题、UP 主、主题、感想、原文引用或评论关键词或 BV 号，不要填整句问题。"
-            "感想用 journal，最近浏览用 browse，旧评论用 comments，跟进用 replies，综合用 all。"
-            "默认查最近7天；需要更早记录可增大 days，0 表示全部历史。"
-            "同条件还有结果时，按next_call.arguments续页；若当前Schema要求session_id，保留上次调用相同真实session_id，其余参数原样。"
-            "cursor十分钟有效，过期、重载或改条件后去掉cursor重新查。"
-            "区分已发送、预览草稿、失败与未知结果，只按返回事实自然回答。"
+            "区分已发送、预览草稿、失败与unknown（结果未知），只按返回事实回答。"
         ),
         parameters={
-            "query": {"type": "string", "description": "标题、UP主、主题、感想、原文引用、评论的简短关键词或BV号；逐字段字面匹配，留空查最近记录", "default": ""},
+            "query": {"type": "string", "description": "标题、UP主、主题、感想、原文引用或评论的简短关键词，或BV号；不要填整句问题。逐字段字面匹配，留空查最近记录", "default": ""},
             "kind": {"type": "string", "enum": ["all", "browse", "comments", "replies", "journal"], "default": "all",
                      "description": "journal=阅读手记/感想；browse=手记及旧浏览；comments=一级评论尝试；replies=跟进回复尝试；all=全部。尝试不等于已发布，以published为准"},
             "days": {"type": "integer", "minimum": 0, "maximum": 3650, "default": 7,
-                     "description": "最近多少天，0 表示不限时间"},
+                     "description": "查询最近多少天，默认7；查更早记录可增大，0表示不限时间"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8,
                       "description": "每页最多条数，默认8、最多20，还受12000字符记录预算限制"},
             "cursor": {"type": "string", "default": "",
-                       "description": "首次留空；按next_call.arguments续页；若当前Schema要求session_id，保留上次调用相同真实session_id，其余参数原样。仅本会话、十分钟有效；失效或改条件需去掉cursor重查"},
+                       "description": "首次留空；续页按next_call.arguments调用。若当前Schema要求session_id，保留上次调用相同真实session_id，其余参数原样。cursor仅本会话、十分钟有效；过期、重载或改条件后去掉cursor重查"},
         },
     )
     async def tool_history(
