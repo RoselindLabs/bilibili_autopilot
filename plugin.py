@@ -151,7 +151,10 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
         cfg = self.config
         if (self.discovery is not None and not self.discovery.closed and cfg.plugin.enabled
                 and cfg.ecosystem.enabled and decision.interest >= cfg.ecosystem.min_interest):
-            await discovery_io(self.discovery.store.remember, uid, item, evidence, decision, time.time(), journal_id)
+            return await discovery_io(self.discovery.store.remember, uid, item, evidence, decision, time.time(), journal_id)
+        return journal.registration('not_registered', 'disabled' if (
+            self.discovery is None or self.discovery.closed or not cfg.plugin.enabled or not cfg.ecosystem.enabled
+        ) else 'not_selected')
 
     async def _share_after_comment(self, uid, item):
         if self.config.ecosystem.enabled:
@@ -711,9 +714,9 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
         chosen_day = today if day == 'today' else day
         result = await discovery_io(journal.page, self.engine.store, uid, cfg.browse.timezone, chosen_day, before, query, 30, status)
         if self.discovery is not None:
-            summaries = await discovery_io(self.discovery.store.journal_shares, uid, result['entries'])
+            diagnostics = await discovery_io(self.discovery.store.journal_diagnostics, uid, result['entries'], self.engine.clock())
             for entry in result['entries']:
-                entry['sharing'] = summaries.get(entry['id'], '')
+                entry['sharing_diagnostic'] = diagnostics.get(entry['id'], {})
         if self.client.uid != uid or self.config != cfg or self._history_closed or revision != self._journal_revision:
             raise ValueError('账号或配置已改变，请刷新手记')
         result.update(today=today, day=chosen_day, logged_in=bool(uid))

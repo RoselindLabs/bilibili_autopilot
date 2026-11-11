@@ -16,6 +16,36 @@ REVISIT_SECONDS = 7 * 86400
 CONTEXT_LIMIT = 10
 CONTEXT_CHARS = 4000
 
+STAGES = {'unknown', 'reading', 'video_info', 'ai_summary', 'subtitle_list', 'subtitle_text',
+          'content_filter', 'cover', 'history', 'reflection', 'validation', 'saving', 'complete'}
+REASONS = {'unknown', 'ok', 'timeout', 'network_or_timeout', 'service_unavailable',
+           'authentication_or_permission', 'risk_or_rate_limit', 'platform_error', 'http_error',
+           'identity_mismatch', 'multi_part', 'no_subtitles', 'insufficient_content', 'filtered',
+           'state_changed', 'cancelled', 'model_error', 'invalid_reflection', 'storage_error', 'internal_error'}
+WARNINGS = {'unknown', 'none', 'summary_timeout', 'summary_network_or_timeout',
+            'summary_service_unavailable', 'summary_unknown'}
+
+
+def diagnostic(stage='unknown', reason_code='unknown', read_warning='unknown'):
+    return {'stage': stage if isinstance(stage, str) and stage in STAGES else 'unknown',
+            'reason_code': reason_code if isinstance(reason_code, str) and reason_code in REASONS else 'unknown',
+            'read_warning': read_warning if isinstance(read_warning, str) and read_warning in WARNINGS else 'unknown'}
+
+
+def registration(status='unknown', reason_code='unknown', registered_at=None):
+    reasons = {'unknown', 'registered', 'disabled', 'no_share_reason', 'no_sink', 'insufficient_content',
+               'not_selected', 'not_completed', 'existing_material', 'registration_error'}
+    return {'status': status if status in {'registered', 'not_registered', 'unknown'} else 'unknown',
+            'reason_code': reason_code if reason_code in reasons else 'unknown',
+            'registered_at': registered_at}
+
+
+def record_registration(store, key, uid, value):
+    with store.connect() as db:
+        db.execute("UPDATE journal SET payload=json_set(payload,'$.material_registration',json(?)) "
+                   "WHERE id=? AND uid=? AND status IN ('noted','passed')",
+                   (json.dumps(value), key, uid))
+
 
 def initialize(db):
     db.executescript("""
@@ -274,6 +304,9 @@ def page(store, uid, timezone, day='', before='', query='', limit=30, status='al
         value.pop('payload', None)
         value['time'] = datetime.fromtimestamp(row['started'], zone).isoformat()
         value['url'] = 'https://www.bilibili.com/video/' + row['bvid']
+        info = value.get('diagnostic')
+        value['diagnostic'] = diagnostic(**{k: info.get(k, 'unknown') for k in ('stage', 'reason_code', 'read_warning')}) if isinstance(info, dict) else diagnostic()
+        value.setdefault('material_registration', registration())
         entries.append(value)
     return {'entries': entries, 'next': rows[limit-1]['id'] if len(rows) > limit else '', 'timezone': timezone}
 

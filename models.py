@@ -99,6 +99,9 @@ class Evidence:
     segments: List[Dict[str, Any]] = field(default_factory=list)
     coverage: str = "仅提供文本，未读取画面或音频"
     cid: int = 0
+    read_stage: str = 'unknown'
+    reason_code: str = 'unknown'
+    read_warning_code: str = 'unknown'
 
 
 class DecisionValidationError(ValueError):

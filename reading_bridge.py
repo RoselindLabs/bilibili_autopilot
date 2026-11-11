@@ -6,7 +6,7 @@ The original account/comment databases and credentials are not modified here.
 """
 
 import asyncio
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 import hashlib
 import hmac
 import json
@@ -16,6 +16,9 @@ import re
 import sqlite3
 import time
 import uuid
+
+from .models import normalized
+from . import journal
 
 PROVIDER = "local.bilibili-autopilot"
 CLIENT = "neko.proactive"
@@ -112,10 +115,17 @@ class ReadingStore:
             raise ValueError("invalid_reading_identity")
         text = evidence.text.strip()
         if len(text) < 30:
-            return
+            return journal.registration('not_registered', 'insufficient_content')
+        quote = getattr(decision, 'evidence_quote', '')
+        # Reflection has already been validated; defend this storage boundary too.
+        # Normalized matching is grounding in supplied text, not factual certification.
+        quote = quote if (isinstance(quote, str) and 0 < len(quote) <= 400
+                          and len(normalized(quote)) >= 6 and normalized(quote) in normalized(text)) else ''
+        start = text.find(quote) if quote else -1
+        excerpt = text[max(0, start - min(40, 480 - len(quote))):][:480] if start >= 0 else text[:480]
         payload = {
             "topic": item.title[:160],
-            "summary": text[:480],
+            "summary": excerpt,
             "opinion": getattr(decision, 'thought', decision.reason)[:800],
             "share_reason": getattr(decision, 'share_reason', '')[:200],
             "journal": hasattr(decision, 'thought'),
@@ -126,6 +136,8 @@ class ReadingStore:
             "fictional": False,
             "kind": "bilibili",
         }
+        if quote:
+            payload['evidence_quote'] = quote
         with self.connect() as db:
             db.execute("DELETE FROM readings WHERE created<?", (now - 172800,))
             db.execute(
@@ -135,6 +147,50 @@ class ReadingStore:
             db.execute(
                 "DELETE FROM readings WHERE rowid IN (SELECT rowid FROM readings ORDER BY created DESC LIMIT -1 OFFSET 256)"
             )
+            row = db.execute('SELECT created,payload FROM readings WHERE uid=? AND bvid=?', (uid, item.bvid)).fetchone()
+            if row and (not journal_id or json.loads(row['payload']).get('journal_id') == journal_id):
+                return journal.registration('registered', 'registered', row['created'])
+            return journal.registration('unknown', 'existing_material')
+
+    def journal_diagnostics(self, uid, entries, now):
+        """Read existing rows only: no schema creation, write transaction or cleanup."""
+        result = {e['id']: {'material': 'unknown', 'offer_counts': {}, 'offers_known': False,
+                            'offer_scope': 'account_video_history'} for e in entries[:50]}
+        if not self.path.is_file() or self.path.is_symlink():
+            return result
+        try:
+            with closing(sqlite3.connect(self.path.resolve().as_uri() + '?mode=ro', uri=True, timeout=3)) as db:
+                db.row_factory = sqlite3.Row
+                db.execute('PRAGMA query_only=ON')
+                db.execute('BEGIN')
+                for entry in entries[:50]:
+                    info = result[entry['id']]
+                    row = db.execute('SELECT created,payload FROM readings WHERE uid=? AND bvid=?',
+                                     (uid, entry['bvid'])).fetchone()
+                    registration = entry.get('material_registration', {})
+                    registered_at = registration.get('registered_at') if isinstance(registration, dict) else None
+                    if row:
+                        payload = json.loads(row['payload'])
+                        if isinstance(payload, dict) and payload.get('journal_id') == entry['id']:
+                            info['material'] = 'available' if 0 <= now - row['created'] < 172800 else 'expired' if now - row['created'] >= 172800 else 'unknown'
+                    if info['material'] == 'unknown':
+                        if (isinstance(registration, dict) and registration.get('status') == 'registered'
+                                and type(registered_at) in (int, float) and now - registered_at >= 172800):
+                            info['material'] = 'expired'
+                        elif isinstance(registration, dict) and registration.get('status') == 'not_registered':
+                            info['material'] = 'not_registered'
+                    counts = db.execute('SELECT status,count(*) AS n FROM offers WHERE uid=? AND bvid=? GROUP BY status',
+                                        (uid, entry['bvid'])).fetchall()
+                    allowed = {'prepared', 'submitted', 'shown', 'released', 'unknown', 'unavailable'}
+                    for count in counts:
+                        state = count['status'] if count['status'] in allowed else 'unrecognized'
+                        info['offer_counts'][state] = info['offer_counts'].get(state, 0) + count['n']
+                    info['offers_known'] = True
+        except (OSError, sqlite3.Error, ValueError, TypeError):
+            # Missing/old/corrupt schema is not evidence of a failed registration.
+            return {e['id']: {'material': 'unknown', 'offer_counts': {}, 'offers_known': False,
+                              'offer_scope': 'account_video_history'} for e in entries[:50]}
+        return result
 
     def nonce(self, nonce, now):
         with self.connect() as db:

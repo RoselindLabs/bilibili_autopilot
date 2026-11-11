@@ -104,25 +104,44 @@ class PlatformError(Exception):
     def __init__(self, operation: str, code: int):
         self.operation = operation
         self.code = code
+        self.stage = READ_STAGES.get(operation.removesuffix('（HTTP）'), 'unknown')
         if code in {-504, 408, 504}:
+            self.reason_code = 'timeout'
             reason = "服务调用超时"
         elif code in {-500, -503, 500, 502, 503}:
+            self.reason_code = 'service_unavailable'
             reason = "平台服务暂不可用"
         elif code in {-101, -102, -111, -401, -403, 401, 403}:
+            self.reason_code = 'authentication_or_permission'
             reason = "登录或权限校验未通过"
         elif code in {-352, -412, -509, -799, 412, 429}:
+            self.reason_code = 'risk_or_rate_limit'
             reason = "被平台风控或限流拦截"
         else:
+            self.reason_code = 'platform_error'
             reason = "平台返回异常"
         super().__init__(f"{operation}：{reason}（code={code}）")
+
+
+READ_STAGES = {
+    '读取视频信息': 'video_info', '读取 AI 摘要': 'ai_summary', '读取字幕列表': 'subtitle_list',
+    '下载字幕文件': 'subtitle_text', '补充相关字幕列表': 'subtitle_list', '补充相关字幕文件': 'subtitle_text',
+}
 
 
 class VideoReadError(Exception):
     """视频读取阶段的可公开错误，不包含签名地址或请求头。"""
 
-    def __init__(self, reason: str, retryable: bool):
+    def __init__(self, reason: str, retryable: bool, *, stage='unknown', reason_code='unknown', read_warning='unknown'):
         self.retryable = retryable
+        self.stage, self.reason_code, self.read_warning = stage, reason_code, read_warning
         super().__init__(reason)
+
+
+class VideoIdentityError(ValueError):
+    """Retain the original fatal ValueError behavior with a fixed diagnostic code."""
+    stage = 'video_info'
+    reason_code = 'identity_mismatch'
 
 
 class SubtitleText(str):
@@ -431,18 +450,21 @@ class BiliClient:
         except ResponseCodeException as exc:
             raise PlatformError(stage, exc.code) from None
         except READ_NETWORK_ERRORS as exc:
-            raise VideoReadError(f"{stage}超时或网络连接失败：{type(exc).__name__}", True) from None
+            raise VideoReadError(f"{stage}超时或网络连接失败：{type(exc).__name__}", True,
+                                 stage=READ_STAGES.get(stage, 'unknown'), reason_code='network_or_timeout') from None
         except (NetworkException, httpx.HTTPStatusError) as exc:
             code = exc.status if isinstance(exc, NetworkException) else exc.response.status_code
             if code in {401, 403, 412, 429}:
                 raise PlatformError(f"{stage}（HTTP）", code) from None
-            raise VideoReadError(f"{stage}失败（HTTP {code}）", code >= 500 or code == 408) from None
+            raise VideoReadError(f"{stage}失败（HTTP {code}）", code >= 500 or code == 408,
+                                 stage=READ_STAGES.get(stage, 'unknown'),
+                                 reason_code='timeout' if code == 408 else 'service_unavailable' if code >= 500 else 'http_error') from None
 
     async def understand(self, item: VideoItem, max_chars: int) -> Tuple[VideoItem, Evidence]:
         resource = video.Video(bvid=item.bvid, credential=self.credential)
         info = await self._read_stage("读取视频信息", resource.get_info())
         if int(info["aid"]) != item.aid or info["bvid"] != item.bvid:
-            raise ValueError("视频 ID 校验失败")
+            raise VideoIdentityError("视频 ID 校验失败")
         item = replace(
             item,
             title=str(info.get("title", ""))[:300],
@@ -454,7 +476,7 @@ class BiliClient:
             cover_url=cover_url(info.get('pic', '')),
         )
         if int(info.get("videos", 1)) > 1:
-            return item, Evidence("unavailable", "")
+            return item, Evidence("unavailable", "", read_stage='video_info', reason_code='multi_part', read_warning_code='none')
         cid = int(info["cid"])
         summary_error = None
         try:
@@ -473,26 +495,36 @@ class BiliClient:
                     text.strip()[:max_chars],
                     coverage="仅 AI 摘要，未读取字幕、画面或音频",
                     cid=cid,
+                    read_stage='ai_summary', reason_code='ok', read_warning_code='none',
                 )
         try:
             subtitles = await self._read_stage("读取字幕列表", resource.get_subtitle(cid=cid))
         except (PlatformError, VideoReadError) as exc:
             if summary_error is None:
                 raise
+            exc.read_warning = 'summary_' + summary_error.reason_code
             retryable = exc.code == -504 if isinstance(exc, PlatformError) else exc.retryable
             if not retryable:
                 raise
-            raise VideoReadError(f"{summary_error}；{exc}", True) from None
+            raise VideoReadError(f"{summary_error}；{exc}", True, stage=exc.stage,
+                                 reason_code=exc.reason_code, read_warning='summary_' + summary_error.reason_code) from None
         entries = (subtitles or {}).get("subtitles") or []
         entries = sorted(entries, key=lambda x: not str(x.get("lan", "")).startswith(("zh", "ai-zh")))
         if not entries:
             if summary_error is not None:
-                raise VideoReadError(f"{summary_error}；视频没有可用字幕", True) from None
-            return item, Evidence("unavailable", "")
+                raise VideoReadError(f"{summary_error}；视频没有可用字幕", True, stage='subtitle_list',
+                                     reason_code='no_subtitles', read_warning='summary_' + summary_error.reason_code) from None
+            return item, Evidence("unavailable", "", read_stage='subtitle_list', reason_code='no_subtitles', read_warning_code='none')
         url = subtitle_url(entries[0]["subtitle_url"])
-        text = await self._read_stage("下载字幕文件", self._subtitle_text(url))
+        try:
+            text = await self._read_stage("下载字幕文件", self._subtitle_text(url))
+        except (PlatformError, VideoReadError) as exc:
+            if summary_error is not None:
+                exc.read_warning = 'summary_' + summary_error.reason_code
+            raise
         if summary_error is not None and len(text.strip()) < 30:
-            raise VideoReadError(f"{summary_error}；字幕不足三十字，无法提供有效内容依据", True) from None
+            raise VideoReadError(f"{summary_error}；字幕不足三十字，无法提供有效内容依据", True, stage='subtitle_text',
+                                 reason_code='insufficient_content', read_warning='summary_' + summary_error.reason_code) from None
         segments = text.segments if isinstance(text, SubtitleText) else []
         sampled, selected = select_subtitles(segments, max_chars)
         return item, Evidence(
@@ -502,6 +534,8 @@ class BiliClient:
             selected,
             "字幕文本抽样，未读取画面或音频；未列出的片段不在覆盖范围",
             cid,
+            'subtitle_text', 'ok' if len(text.strip()) >= 30 else 'insufficient_content',
+            'summary_' + summary_error.reason_code if summary_error else 'none',
         )
 
     async def enrich(self, item: VideoItem, evidence: Evidence, topic: str, max_chars: int) -> Evidence:
@@ -532,6 +566,7 @@ class BiliClient:
             selected,
             "字幕按评论主题抽样并覆盖开头、中段、结尾；未读取画面或音频",
             0,
+            'subtitle_text', 'ok', evidence.read_warning_code,
         )
 
     async def _subtitle_text(self, url: str) -> str:

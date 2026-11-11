@@ -21,6 +21,7 @@ from .client import (
     READ_NETWORK_ERRORS,
     UnknownPublish,
     VideoReadError,
+    VideoIdentityError,
 )
 from .config import AutopilotConfig, stage_config
 from .models import (
@@ -482,8 +483,10 @@ class Autopilot:
         return "\n".join(lines) or "本次没有需要处理的新回复"
 
     async def _want_to_browse(
-        self, uid: str, cfg: AutopilotConfig, stats: Dict[str, Any], persona: str, candidates: List[VideoItem]
+        self, uid: str, cfg: AutopilotConfig, stats: Dict[str, Any], persona: str, candidates: List[VideoItem],
+        limit: Optional[int] = None,
     ) -> bool:
+        limit = cfg.browse.videos_per_round if limit is None else limit
         choice = await asyncio.to_thread(self.store.latest_browse_decision, uid)
         if choice and self.next_check_time(choice, cfg) > self.clock():
             self.last_result = "尚未到下次自主浏览检查时间"
@@ -501,7 +504,7 @@ class Autopilot:
             recent=recent,
             candidates=candidates,
             explore_more=cfg.browse.explore_more,
-            limit=cfg.browse.videos_per_round,
+            limit=limit,
         )
         if not cfg.comment.publish_enabled:
             memories = await durable_io(journal.context, self.store, uid)
@@ -529,7 +532,7 @@ class Autopilot:
             return False
         try:
             decision = parse_browse_decision(
-                raw, min_minutes, cfg.browse.max_check_minutes, candidates, cfg.browse.videos_per_round
+                raw, min_minutes, cfg.browse.max_check_minutes, candidates, limit
             )
         except (ValueError, TypeError) as exc:
             # 格式不完整时不擅自去浏览；下次检查时重新判断，不自动修补模型原文。
@@ -813,13 +816,14 @@ class Autopilot:
                         if lane and len(candidates) < 10:
                             candidates.append(lane.pop(0))
                     present = [lane for lane in present if lane]
-                if remaining == 1:
+                if remaining == 1 and mode != 'journal':
                     # 单项轮次轮流开放一个来源，仍由模型决定是否有兴趣。
                     candidates = candidates[:1]
                 await asyncio.to_thread(self.store.set_meta, turn_key, str(turn + 1))
             if self.paused or not self.get_config().plugin.enabled or self.get_config() != cfg or not self.active(cfg):
                 return "读取推荐期间已暂停或配置、活动时段变化，本轮不浏览"
-            if not await self._want_to_browse(uid, cfg, stats, persona, candidates):
+            if not await self._want_to_browse(uid, cfg, stats, persona, candidates,
+                                              limit=remaining if mode == 'journal' else None):
                 return self.last_result
             by_id = {item.bvid: item for item in candidates}
             items = [by_id[bvid] for bvid in self._selected_bvids] if self._selected_bvids or mode == 'journal' else candidates
@@ -1195,11 +1199,16 @@ class Autopilot:
         reflection_cfg = stage_config(cfg, 'reflection')
         key = await durable_io(journal.begin, self.store, uid, item, self.clock())
         closed = False
+        stage, warning = 'reading', 'unknown'
+        def details(reason, code, **extra):
+            return {'reason': reason, 'diagnostic': journal.diagnostic(stage, code, warning),
+                    'material_registration': journal.registration('not_registered', 'not_completed'), **extra}
         try:
             await durable_io(self.store.visit, uid, item.bvid, 'journal', self.clock(), 'reading', '{}', False)
             item, evidence = await self.client.understand(item, reflection_cfg.model.content_max_chars)
+            stage, warning = evidence.read_stage, evidence.read_warning_code
             if (self.get_config() != cfg or self.paused or not self.active(cfg) or self.client.uid != uid):
-                await durable_io(journal.finish, self.store, key, uid, 'cancelled', {'reason': '读取期间状态改变'}, self.clock(), item)
+                await durable_io(journal.finish, self.store, key, uid, 'cancelled', details('读取期间状态改变', 'state_changed'), self.clock(), item)
                 closed = True
                 return '本次阅读已停止'
             blocked = self.filter_item(item, cfg) or any(
@@ -1207,47 +1216,69 @@ class Autopilot:
             )
             if blocked or len(evidence.text.strip()) < 30:
                 reason = '内容已跳过' if blocked else '没有读到足够的正文'
-                await durable_io(journal.finish, self.store, key, uid, 'unread', {'reason': reason}, self.clock(), item)
+                if blocked:
+                    stage = 'content_filter'
+                await durable_io(journal.finish, self.store, key, uid, 'unread', details(reason, 'filtered' if blocked else evidence.reason_code if evidence.reason_code not in {'ok', 'unknown'} else 'insufficient_content'), self.clock(), item)
                 closed = True
                 return reason
             from .cover import load_cover
+            stage = 'cover'
             cover = await load_cover(item.cover_url)
             if self.get_config() != cfg or self.paused or not self.active(cfg) or self.client.uid != uid:
-                await durable_io(journal.finish, self.store, key, uid, 'cancelled', {'reason': '读取封面期间状态改变'}, self.clock(), item)
+                await durable_io(journal.finish, self.store, key, uid, 'cancelled', details('读取封面期间状态改变', 'state_changed'), self.clock(), item)
                 closed = True
                 return '本次阅读已停止'
+            stage = 'history'
             memories = await durable_io(journal.context, self.store, uid, item)
+            stage = 'reflection'
             raw = await asyncio.wait_for(self._generate_model(
                 journal.prompt(item, evidence, persona, cfg.browse.interests, memories, self.clock(), cfg.browse.timezone, cover), reflection_cfg
             ), timeout=reflection_cfg.model.decision_budget_seconds)
+            stage = 'validation'
             reflection = journal.parse(raw, evidence, memories)
             if self.get_config() != cfg or self.paused or not self.active(cfg) or self.client.uid != uid:
-                await durable_io(journal.finish, self.store, key, uid, 'cancelled', {'reason': '记录前状态改变'}, self.clock(), item)
+                await durable_io(journal.finish, self.store, key, uid, 'cancelled', details('记录前状态改变', 'state_changed'), self.clock(), item)
                 closed = True
                 return '本次感想未保存'
             payload = {**asdict(reflection), 'source': evidence.source[:100], 'coverage': evidence.coverage[:300],
                        'cover_provided': bool(cover),
                        'related': [h for h in memories if h['id'] in reflection.related_ids]}
+            payload['diagnostic'] = journal.diagnostic('complete', 'ok', warning)
+            payload['material_registration'] = journal.registration(
+                'unknown' if reflection.share_reason and self.reading_sink is not None else 'not_registered',
+                'unknown' if reflection.share_reason and self.reading_sink is not None else 'no_share_reason' if not reflection.share_reason else 'no_sink')
             if cover:
                 payload['coverage'] += '；另提供静态封面，未播放视频'
+            stage = 'saving'
             await durable_io(journal.finish, self.store, key, uid, 'noted' if reflection.thought else 'passed', payload, self.clock(), item)
             closed = True
             if reflection.share_reason and self.reading_sink is not None:
                 try:
-                    await self.reading_sink(uid, item, evidence, reflection, journal_id=key)
+                    result = await self.reading_sink(uid, item, evidence, reflection, journal_id=key)
+                    await durable_io(journal.record_registration, self.store, key, uid,
+                                     result if isinstance(result, dict) else journal.registration())
                 except asyncio.CancelledError:
                     raise
                 except Exception:
+                    await durable_io(journal.record_registration, self.store, key, uid,
+                                     journal.registration('unknown', 'registration_error'))
                     return '手记已保存，分享素材暂未登记'
             return '留下手记：' + reflection.thought if reflection.thought else '读过，暂时没有更多感想：' + reflection.reason
         except asyncio.CancelledError:
             if not closed:
-                await durable_io(journal.finish, self.store, key, uid, 'interrupted', {'reason': '本次阅读中断'}, self.clock())
+                await durable_io(journal.finish, self.store, key, uid, 'interrupted', details('本次阅读中断', 'cancelled'), self.clock())
             raise
         except Exception as exc:
             if not closed:
+                code = ('timeout' if isinstance(exc, (asyncio.TimeoutError, ModelTimeoutError)) else
+                        'model_error' if isinstance(exc, ModelResponseError) else
+                        'invalid_reflection' if stage == 'validation' and isinstance(exc, (ValueError, TypeError)) else
+                        'storage_error' if stage == 'saving' else 'internal_error')
+                if isinstance(exc, (PlatformError, VideoReadError, VideoIdentityError)):
+                    stage, code = exc.stage, exc.reason_code
+                    warning = getattr(exc, 'read_warning', warning)
                 await durable_io(journal.finish, self.store, key, uid, 'failed',
-                                 {'reason': '阅读或感想未完成：' + type(exc).__name__}, self.clock())
+                                 details('阅读或感想未完成：' + type(exc).__name__, code), self.clock())
             if isinstance(exc, (LoginRequired, PlatformError)):
                 raise
             return '本次感想未完成，保留阅读记录，不自动重试'

@@ -132,17 +132,60 @@ class ReadingRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('字幕列表',str(raised.exception))
         self.assertNotIn('PRIVATE',str(raised.exception))
 
+    async def test_summary_warning_survives_nonretryable_subtitle_list_error(self):
+        self.resource.get_ai_conclusion.side_effect = ResponseCodeException(-504, 'PRIVATE summary')
+        for failure, expected, retryable in (
+            (NetworkException(404, 'PRIVATE list'), VideoReadError, False),
+            (ResponseCodeException(-412, 'PRIVATE list'), PlatformError, None),
+        ):
+            with self.subTest(error=expected.__name__):
+                self.resource.get_subtitle.side_effect = failure
+                with self.assertRaises(expected) as raised:
+                    await self.client.understand(ITEM, 12000)
+                error = raised.exception
+                self.assertEqual(error.stage, 'subtitle_list')
+                self.assertEqual(error.read_warning, 'summary_timeout')
+                self.assertEqual(getattr(error, 'retryable', None), retryable)
+                if isinstance(error, PlatformError):
+                    self.assertEqual(error.code, -412)
+                self.assertNotIn('PRIVATE', str(error))
+                self.assertNotIn('AI 摘要', str(error))
+        self.sub.assert_not_awaited()
+
+    async def test_summary_warning_survives_subtitle_download_failure(self):
+        self.resource.get_ai_conclusion.side_effect = ResponseCodeException(-504, 'PRIVATE summary')
+        for failure, expected, retryable in (
+            (asyncio.TimeoutError('PRIVATE download'), VideoReadError, True),
+            (NetworkException(404, 'PRIVATE download'), VideoReadError, False),
+            (NetworkException(403, 'PRIVATE download'), PlatformError, None),
+        ):
+            with self.subTest(error=type(failure).__name__, retryable=retryable):
+                self.sub.side_effect = failure
+                with self.assertRaises(expected) as raised:
+                    await self.client.understand(ITEM, 12000)
+                error = raised.exception
+                self.assertEqual(error.stage, 'subtitle_text')
+                self.assertEqual(error.read_warning, 'summary_timeout')
+                self.assertEqual(getattr(error, 'retryable', None), retryable)
+                if isinstance(error, PlatformError):
+                    self.assertEqual(error.code, 403)
+                self.assertNotIn('PRIVATE', str(error))
+                self.assertNotIn('AI 摘要', str(error))
+        self.assertEqual(self.sub.await_count, 3)
+
     async def test_info_failure_has_stage_and_never_fetches_summary(self):
         self.resource.get_info.side_effect=asyncio.TimeoutError('PRIVATE')
         with self.assertRaises(VideoReadError) as raised:
             await self.client.understand(ITEM,12000)
         self.assertIn('视频信息',str(raised.exception))
+        self.assertEqual((raised.exception.stage, raised.exception.reason_code), ('video_info', 'network_or_timeout'))
         self.resource.get_ai_conclusion.assert_not_awaited()
 
     async def test_good_summary_avoids_subtitle_request(self):
         self.resource.get_ai_conclusion.return_value={'model_result':{'summary':EVIDENCE.text}}
         _,evidence=await self.client.understand(ITEM,12000)
         self.assertEqual(evidence.read_warning,'')
+        self.assertEqual((evidence.read_stage, evidence.reason_code, evidence.read_warning_code), ('ai_summary', 'ok', 'none'))
         self.resource.get_subtitle.assert_not_awaited()
 
     async def test_summary_timeout_is_not_reported_as_permission_rejection(self):
@@ -151,6 +194,7 @@ class ReadingRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('服务调用超时',evidence.read_warning)
         self.assertNotIn('被平台拒绝',evidence.read_warning)
         self.assertIn('code=-504',evidence.read_warning)
+        self.assertEqual((evidence.read_stage, evidence.read_warning_code), ('subtitle_text', 'summary_timeout'))
 
     def test_platform_error_categories_are_safe_and_distinct(self):
         for code,word in [(-504,'超时'),(-503,'暂不可用'),(-101,'登录'),(-403,'权限'),
