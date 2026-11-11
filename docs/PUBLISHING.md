@@ -2,9 +2,9 @@
 
 ## Neko维护fork当前发布合同
 
-本fork当前为0.13.1，源码仓库为 `RoselindLabs/bilibili_autopilot`；原作者sakura桜花及MIT不变。继承的自动Release工作流仍归档，不能仅推Tag就认为已发版。维护版本独立于上游，配置格式保留0.2.0；0.9.1排除实验小程序卡片和相关表字段迁移，不以原作者的QQ或Docker验收替代本fork验证。
+本fork当前为0.13.3，源码仓库为 `RoselindLabs/bilibili_autopilot`；原作者sakura桜花及MIT不变。继承的自动Release工作流仍归档，不能仅推Tag就认为已发版。维护版本独立于上游，配置格式保留0.2.0；0.9.1排除实验小程序卡片和相关表字段迁移，不以原作者的QQ或Docker验收替代本fork验证。
 
-- 本地运行 `python scripts/run_tests.py`、`python scripts/check_archive.py`，按明确公共白名单打包；可用 `python scripts/validate_release.py --tag v0.13.1 --archive dist/bilibili-autopilot.zip` 检查版本及包。
+- 本地运行 `python scripts/run_tests.py`、`python scripts/check_archive.py`，按明确公共白名单打包；可用 `python scripts/validate_release.py --tag v0.13.3 --archive dist/bilibili-autopilot.zip` 检查版本及包。
 - 获得发布授权后，须干净main精确SHA的 `ci.yml` Linux生产/Windows最低两组完整测试、包验证及ci-gate/publish-gate成功，才经面板标准 `python scripts/update_maibot_plugin.py neko-bilibili` 热加载；不直接覆盖线上、不重启MaiBot主进程。
 - ID及线上目录保持 `local.bilibili-autopilot` / `local_bilibili-autopilot`，保留config.toml、登录凭据、配对密钥、最新状态库与unknown/消费墓碑。新版本不会改变现有发布开关，不重新发送历史任务。
 - 回滚仅退公共源码并保留最新数据；已因未知发送暂停的旧实例须管理员明确start恢复浏览，unknown继续阻止发布，不能靠清库或恢复旧库解除。

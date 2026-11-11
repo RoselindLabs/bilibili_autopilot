@@ -19,7 +19,7 @@ import httpx
 from maibot_sdk import API, Command, HookHandler, MaiBotPlugin, Tool
 from maibot_sdk.types import HookMode, HookOrder
 
-from .activity import HistoryHandoff, is_activity_question, planner_scopes, query_activity, reply_message_key
+from .activity import HistoryCursors, HistoryHandoff, is_activity_question, planner_scopes, query_activity, reply_message_key
 from .client import BiliClient, LoginRequired, PlatformError
 from .config import AutopilotConfig, reading_config_schema, stage_config
 from .engine import Autopilot, ReadWaiting
@@ -77,12 +77,14 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
         self._last_operation_ok = True
         self.discovery = None
         self._history_handoff = HistoryHandoff()
+        self._history_cursors = HistoryCursors()
         self._history_closed = False
         self._journal_revision = 0
         self._journal_deletions = {}
 
     async def on_load(self) -> None:
         self._history_closed = False
+        self._history_cursors = HistoryCursors()
         data_dir = Path(self.ctx.paths.data_dir)
         self.client = BiliClient(data_dir / "credential.json", logger=self.ctx.logger)
         self.engine = Autopilot(
@@ -113,6 +115,7 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
 
     async def on_unload(self) -> None:
         self._history_closed = True
+        self._history_cursors = HistoryCursors()
         self._journal_deletions.clear()
         if self.discovery is not None:
             self.discovery.closed = True
@@ -133,6 +136,7 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
 
     async def on_config_update(self, scope: str, config_data: Dict[str, Any], version: str) -> None:
         del scope, config_data, version
+        self._history_cursors = HistoryCursors()
         self._journal_deletions.clear()
         self._history_handoff.turns.clear()
         if self.sharer is not None:
@@ -165,14 +169,39 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
                  self.config.ecosystem.account_id, self.client.uid if self.client else "",
                  self._history_closed, tuple(self.config.ecosystem.qq_friend_ids))
 
-    async def _history_scope(self, session):
+    @staticmethod
+    def _history_context(kwargs):
+        context = kwargs.get('_host_context')
+        if not isinstance(context, dict) or context.get('contract') != 'neko.tools.context.v1':
+            return None
+        for key in ('session_id', 'stream_id', 'platform', 'account_id', 'group_id', 'user_id'):
+            value = context.get(key)
+            if (not isinstance(value, str) or len(value) > 128 or value != value.strip()
+                    or any(ord(c) < 32 for c in value)):
+                return None
+        if (not context['session_id'] or context['session_id'] != context['stream_id']
+                or context['platform'] != 'qq'):
+            return None
+        return dict(context)
+
+    async def _history_scope(self, session, context=None):
         policy = self._history_policy()
         if not policy[0] or not (policy[1] or policy[5]) or not policy[3] or policy[4] or not session:
             return None
         try:
             stream = await authorized_chat(self.ctx, session, policy[1], policy[5], policy[2])
+            if context is not None:
+                # Account may legitimately be absent in normal/Focus Host envelopes.
+                # Resolve it through the existing authorized QQ route, never model args.
+                if (context['account_id'] and context['account_id'] != str(stream.get('account_id') or '')
+                        or context['group_id'] != str(stream.get('group_id') or '')
+                        or (stream.get('chat_type') == 'private'
+                            and (not context['user_id'] or context['user_id'] != str(stream.get('user_id') or '')))):
+                    return None
             if self._history_policy() == policy:
-                return policy, str(stream["account_id"])
+                return policy, tuple(str(stream.get(key) or '') for key in (
+                    'session_id', 'platform', 'chat_type', 'account_id', 'group_id', 'user_id',
+                ))
         except Exception:
             # Failed scope resolution must never become an implicit grant.
             return None
@@ -242,36 +271,49 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
     @Tool(
         "bilibili_autopilot_history",
         platforms="qq",
-        brief_description="回忆自己刷B站的感想与经历；在已授权聊天查询真实手记或旧评论",
+        trusted_context="neko.tools.context.v1",
+        brief_description=(
+            "查询自己B站浏览历史、手记感想、评论和跟进回复；按关键词找主题或原文依据，"
+            "更多按next_call续查更早记录。仅已授权QQ聊天，只读、不刷视频或发送。"
+        ),
         detailed_description=(
             "当用户问你最近在 B 站/bilibili 刷了什么、看了什么、评论了什么、回复了谁，"
             "或回忆自己刷 B 站的经历时，先用本工具查真实记录再回答。"
             "包括后台自主浏览；不要因为当前聊天没有记录就回答不知道。"
             "这是只读查询，不会刷视频或发评论。"
             "仅share.qq_group_ids授权群、ecosystem.qq_friend_ids授权私聊及指定QQ账号可查。"
-            "query 用简短标题关键词、UP 主名、评论关键词或 BV 号，不要填整句问题。"
+            "query 用简短标题、UP 主、主题、感想、原文引用或评论关键词或 BV 号，不要填整句问题。"
             "感想用 journal，最近浏览用 browse，旧评论用 comments，跟进用 replies，综合用 all。"
             "默认查最近7天；需要更早记录可增大 days，0 表示全部历史。"
+            "同条件还有结果时，原样使用next_call的参数续页；共享Focus沿用本次会话路由。"
+            "cursor十分钟有效，过期、重载或改条件后去掉cursor重新查。"
             "区分已发送、预览草稿、失败与未知结果，只按返回事实自然回答。"
         ),
         parameters={
-            "query": {"type": "string", "description": "关键词或 BV 号；留空查询最近记录", "default": ""},
-            "kind": {"type": "string", "enum": ["all", "browse", "comments", "replies", "journal"], "default": "all"},
+            "query": {"type": "string", "description": "标题、UP主、主题、感想、原文引用、评论的简短关键词或BV号；逐字段字面匹配，留空查最近记录", "default": ""},
+            "kind": {"type": "string", "enum": ["all", "browse", "comments", "replies", "journal"], "default": "all",
+                     "description": "journal=阅读手记/感想；browse=手记及旧浏览；comments=一级评论尝试；replies=跟进回复尝试；all=全部。尝试不等于已发布，以published为准"},
             "days": {"type": "integer", "minimum": 0, "maximum": 3650, "default": 7,
                      "description": "最近多少天，0 表示不限时间"},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8},
+            "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8,
+                      "description": "每页最多条数，默认8、最多20，还受12000字符记录预算限制"},
+            "cursor": {"type": "string", "default": "",
+                       "description": "首次留空；有next_call时原样带其cursor及原query/kind/days/limit续查更早记录。仅本会话、十分钟有效；失效或改条件需去掉cursor重查"},
         },
     )
     async def tool_history(
-        self, query: str = "", kind: str = "all", days: int = 7, limit: int = 8, **kwargs: Any
+        self, query: str = "", kind: str = "all", days: int = 7, limit: int = 8, cursor: str = "", **kwargs: Any
     ) -> Dict[str, Any]:
-        session = str(kwargs.get("stream_id") or "")
+        context = self._history_context(kwargs)
+        if context is None:
+            return {"success": False, "content": "缺少有效的Host可信QQ会话信封，无法查询；需要支持neko.tools.context.v1的宿主。"}
+        session = context['session_id']
         token = self._history_handoff.begin(session)
         if not self.config.plugin.enabled:
             return {"success": False, "content": "B站自主浏览插件已禁用，无法查询活动记录。"}
         if self.engine is None or self.client is None or not self.client.uid:
             return {"success": False, "content": "B站插件尚未初始化或未登录，无法确定要查询的账号。"}
-        scope = await self._history_scope(session)
+        scope = await self._history_scope(session, context)
         if scope is None:
             self._history_handoff.turns.pop(session, None)
             return {"success": False, "content": "当前聊天未获B站资料授权，或QQ会话身份暂不可核验。"}
@@ -281,10 +323,11 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
             result = await asyncio.to_thread(
                 query_activity, self.engine.store, uid, now=self.engine.clock(), timezone=self.config.browse.timezone,
                 query=query, kind=kind, days=days, limit=limit,
+                cursor=cursor, cursors=self._history_cursors, scope=(session, scope),
             )
         except ValueError as exc:
             return {"success": False, "content": str(exc)}
-        if await self._history_scope(session) != scope or revision != self._journal_revision:
+        if await self._history_scope(session, context) != scope or revision != self._journal_revision:
             self._history_handoff.turns.pop(session, None)
             return {"success": False, "content": "查询期间账号、群授权或插件状态发生变化，请重新查询。"}
         self._history_handoff.remember(session, token, uid, result)
