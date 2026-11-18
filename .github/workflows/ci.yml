@@ -48,7 +48,8 @@ jobs:
     needs: changes
     if: needs.changes.outputs.runtime == 'true'
     timeout-minutes: 15
-    runs-on: ${{ matrix.os }}
+    # setup-python publishes CPython 3.14.4 for Ubuntu 24.04, not 26.04.
+    runs-on: ${{ matrix.case == 'linux-production' && 'ubuntu-24.04' || matrix.os }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.changes.outputs.matrix) }}
