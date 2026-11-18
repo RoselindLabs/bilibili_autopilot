@@ -296,7 +296,7 @@ async def verify(args):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--host-source", type=Path, required=True)
-    p.add_argument("--host-version", default="1.4.3")
+    p.add_argument("--host-version", default="1.4.6")
     p.add_argument("--proactive-source", type=Path, required=True)
     p.add_argument("--extra-site", type=Path)
     p.add_argument("--report", type=Path, required=True)
