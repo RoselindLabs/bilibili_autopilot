@@ -275,19 +275,11 @@ class BilibiliAutopilotPlugin(MaiBotPlugin):
         "bilibili_autopilot_history",
         platforms="qq",
         trusted_context="neko.tools.context.v1",
-        brief_description=(
-            "查询自己B站的已保存浏览历史、手记感想、评论和跟进回复，含后台自主浏览；只读，不刷视频或发送。"
-        ),
-        detailed_description=(
-            "用户问最近看了什么、评论了什么、回复了谁，或要回忆自己的B站经历时，"
-            "先用本工具查真实记录再回答，不要因当前聊天无记录就回答不知道。"
-            "仅share.qq_group_ids授权群、ecosystem.qq_friend_ids授权私聊及指定QQ账号可查。"
-            "区分已发送、预览草稿、失败与unknown（结果未知），只按返回事实回答。"
-        ),
+        description="回忆自己在 B 站看过、写过或回复过什么时，先查已保存的记录。",
         parameters={
             "query": {"type": "string", "description": "标题、UP主、主题、感想、原文引用或评论的简短关键词，或BV号；不要填整句问题。逐字段字面匹配，留空查最近记录", "default": ""},
             "kind": {"type": "string", "enum": ["all", "browse", "comments", "replies", "journal"], "default": "all",
-                     "description": "journal=阅读手记/感想；browse=手记及旧浏览；comments=一级评论尝试；replies=跟进回复尝试；all=全部。尝试不等于已发布，以published为准"},
+                     "description": "journal=阅读手记/感想；browse=手记及旧浏览；comments=一级评论尝试；replies=跟进回复尝试；all=全部。仅published=true可说已发送，预览草稿、失败及unknown（结果未知）不算已确认发送"},
             "days": {"type": "integer", "minimum": 0, "maximum": 3650, "default": 7,
                      "description": "查询最近多少天，默认7；查更早记录可增大，0表示不限时间"},
             "limit": {"type": "integer", "minimum": 1, "maximum": 20, "default": 8,

@@ -262,9 +262,7 @@ class ActivityToolTests(unittest.IsolatedAsyncioTestCase):
         tool = next(c for c in components if c["name"] == "bilibili_autopilot_history")
         self.assertEqual(tool["type"], "TOOL")
         metadata = tool["metadata"]
-        # Upstream 3d2fdf3: SDK 2.22 merges legacy detailed_description into description.
-        description = metadata["detailed_description"] if "detailed_description" in metadata else metadata["description"]
-        self.assertIn("先用本工具查真实记录", description)
+        self.assertEqual(metadata['description'], '回忆自己在 B 站看过、写过或回复过什么时，先查已保存的记录。')
         parameters = metadata.get('parameters_raw') or metadata['parameters']
         if isinstance(parameters, list):
             parameters = {p['name']: p for p in parameters}
@@ -273,7 +271,8 @@ class ActivityToolTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn('主题', parameters['query']['description'])
         self.assertIn('next_call', parameters['cursor']['description'])
         self.assertIn('保留上次调用相同真实session_id', parameters['cursor']['description'])
-        self.assertIn('QQ', description)
+        self.assertIn('published=true', parameters['kind']['description'])
+        self.assertIn('unknown', parameters['kind']['description'])
         self.assertEqual(tool['metadata']['trusted_context'], 'neko.tools.context.v1')
         result = await self.history(query="海洋", stream_id="s", uid="other-account")
         self.assertTrue(result["success"])

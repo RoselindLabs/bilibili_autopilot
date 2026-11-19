@@ -90,11 +90,14 @@ async def verify(args):
         metas = {}
         triggers = []
         calls = []
+        declarations = []
         task = "proactive:neko.proactive:" + str(int(time.time() * 1000))
 
         async def rpc(method, **kwargs):
             if method != "cap.call":
                 assert method in {"plugin.bootstrap", "plugin.register_components", "plugin.unregister"}, method
+                if method == "plugin.register_components":
+                    declarations.extend(kwargs['payload']['components'])
                 return SimpleNamespace(error=None, payload={"accepted": True})
             payload = kwargs["payload"]
             capability, body = payload["capability"], payload["args"]
@@ -211,15 +214,16 @@ async def verify(args):
             from src.core.tooling import ToolInvocation, ToolExecutionContext, ToolExecutionResult
             from src.maisaka.focus.tools import FocusToolRouter, FocusToolRoute, routed_schema
             from jsonschema import validate
-            component = next(c for c in bili.get_components() if c['type'] == 'TOOL')
-            entry = ToolEntry(component['name'], component['type'], 'local.bilibili-autopilot', component['metadata'])
+            component = next(c for c in declarations if c['name'] == 'bilibili_autopilot_history')
+            entry = ToolEntry(component['name'], component['component_type'], component['plugin_id'],
+                              component['metadata'], platforms=component['platforms'])
             assert entry.platforms == {'qq'}
             assert entry.metadata['trusted_context'] == 'neko.tools.context.v1'
-            definition = ComponentQueryService._build_tool_definition(entry)
-            for phrase in ('先用本工具查真实记录', 'QQ'):
-                assert phrase in definition['description'], phrase
-            assert '主题' in definition['parameters']['properties']['query']['description']
-            assert 'next_call' in definition['parameters']['properties']['cursor']['description']
+            spec = ComponentQueryService._build_tool_spec(entry)
+            assert spec.description == component['metadata']['description'] == '回忆自己在 B 站看过、写过或回复过什么时，先查已保存的记录。'
+            properties = spec.parameters_schema['properties']
+            assert '主题' in properties['query']['description']
+            assert 'next_call' in properties['cursor']['description']
             context = ToolExecutionContext(session_id='chat', stream_id='chat', platform='qq',
                                            group_id='123456', is_group_chat=True)
             invocation = ToolInvocation(tool_name=entry.name, arguments={'query': '', 'limit': 1,
@@ -240,7 +244,6 @@ async def verify(args):
             assert history['records'][0]['bvid'] == item.bvid, history
             assert '离线Host历史记录' in response.payload['result']['content']
             assert history['next_call'] and '保留上次调用相同真实session_id' in history['note']
-            spec = ComponentQueryService._build_tool_spec(entry)
             next_args = history['next_call']['arguments']
             validate(next_args, spec.parameters_schema)  # ordinary tools need no session_id argument
             assert 'session_id' in routed_schema(spec, 'chat')['required']
